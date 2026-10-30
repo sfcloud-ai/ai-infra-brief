@@ -6,6 +6,8 @@ AI Infra 晨报将研究规则、编辑规则、历史去重、报告生成和�
 
 仓库另含独立的 [Slack → 企业微信转发器](integrations/slack_wecom/README.md)。其服务命令会读取私有配置并联网，需单独配置和启动；运行晨报流水线不会启动它。
 
+[Slack 私有频道只读控制](integrations/slack_control/README.md) 提供独立的 `help`、`ping`、`status` 请求与线程回执，默认不启动、不接现有 CD，不转发企微。实际应用身份、频道访问和权限需另行确认。
+
 Python 分发名为 `sfcloud-ai`，模块名为 `ai_brief`，安装后的命令为 `ai-brief`。项目使用 [Apache License 2.0](LICENSE)。文档与代码注释使用中文；变量、函数、类名、配置项等标识符使用英文。
 
 ## 安装

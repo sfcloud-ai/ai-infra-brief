@@ -156,6 +156,11 @@ class PackagingTests(unittest.TestCase):
             if "site-packages" in path or "dist-packages" in path:
                 self.assertTrue(Path(path).is_relative_to(self.venv), path)
 
+    def test_installed_control_entry_runs_offline_without_source(self):
+        output = self.checked([str(self.venv / "bin/ai-brief-control"), "capabilities"], self.outside)
+        self.assertEqual(json.loads(output), {"commands": ["help", "ping", "status"],
+                                            "read_only": True, "messages_sent": 0})
+
     def test_installed_cli_runs_outside_checkout(self):
         output = self.checked([str(self.python), "-I", "-B", "-c",
                                "import json,ai_brief; from ai_brief.contracts import RESOURCE_ROOT; "

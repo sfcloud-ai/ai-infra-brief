@@ -15,13 +15,15 @@ dependencies = ["jsonschema==4.26.0"]
 [project.scripts]
 ai-brief = "ai_brief.cli:main"
 ai-brief-relay = "ai_brief_relay.runtime:main"
+ai-brief-control = "ai_brief_control.service:entrypoint"
 
 [tool.setuptools]
-packages = ["ai_brief", "ai_brief_relay"]
+packages = ["ai_brief", "ai_brief_relay", "ai_brief_control"]
 include-package-data = false
 
 [tool.setuptools.package-dir]
 ai_brief_relay = "integrations/slack_wecom"
+ai_brief_control = "integrations/slack_control"
 
 [tool.setuptools.package-data]
 ai_brief = [
