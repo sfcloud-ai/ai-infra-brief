@@ -1,0 +1,68 @@
+name: prototype-stage-candidate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.py'
+      - 'ai_brief/resources/**'
+      - 'deploy/**'
+      - 'pyproject.toml'
+      - 'requirements*.lock'
+      - '.github/workflows/cd.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t4-prototype-stage
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: >-
+      github.repository == 'sfcloud-ai/ai-infra-brief' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      vars.PROTOTYPE_CD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify exact main revision without production credentials
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r deploy/build.lock
+          .venv/bin/python -m compileall -q ai_brief deploy tests
+          .venv/bin/python -m unittest discover -s tests -v
+          .venv/bin/python -B integrations/slack_wecom/run_tests.py --require-unix-socket
+          .venv/bin/python -B scripts/check_public_tree.py
+  stage:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: t4-prototype
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build isolated offline bundle from the same commit
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r deploy/build.lock
+          mkdir "$RUNNER_TEMP/wheels"
+          .venv/bin/python -m pip download --require-hashes --only-binary=:all: -r deploy/runtime.lock -d "$RUNNER_TEMP/wheels"
+          .venv/bin/python -m pip wheel --no-deps --no-build-isolation . -w "$RUNNER_TEMP/wheels"
+          .venv/bin/python deploy/bundle.py --commit "$GITHUB_SHA" --wheels "$RUNNER_TEMP/wheels" --output "$RUNNER_TEMP/release.tar.gz"
+      - name: Stage prototype through restricted SSH command
+        env:
+          T4_SSH_HOST: ${{ secrets.T4_SSH_HOST }}
+          T4_SSH_USER: ${{ secrets.T4_SSH_USER }}
+          T4_SSH_PRIVATE_KEY: ${{ secrets.T4_SSH_PRIVATE_KEY }}
+          T4_SSH_KNOWN_HOSTS: ${{ secrets.T4_SSH_KNOWN_HOSTS }}
+          T4_SSH_PORT: ${{ vars.T4_SSH_PORT }}
+        run: .venv/bin/python deploy/transport.py "$RUNNER_TEMP/release.tar.gz"
