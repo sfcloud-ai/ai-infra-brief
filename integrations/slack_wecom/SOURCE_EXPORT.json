@@ -1,0 +1,43 @@
+{
+  "target_repository": "sfcloud-ai/ai-infra-brief",
+  "status": "isolated_candidate_not_published",
+  "runtime_source_unchanged": true,
+  "runtime_source_sha256": {
+    "relay.py": "b081c5a08efc0d84af0d672b956b19b3b9d4f0984c3f595ab44166c01d92625d",
+    "images.py": "7a4a30f57f71eb93abc07250c095df2d566fcbd38dfd00db8417efaa6a1adc52"
+  },
+  "export_changes": [
+    "Added a Chinese integration README and empty credential/configuration templates",
+    "Generalized synthetic test timestamps and rejected-address fixtures",
+    "Excluded environment-specific deployment scripts and operational data"
+  ],
+  "offline_validation": {
+    "platform": "Linux",
+    "python_version": "3.12",
+    "passed": 56,
+    "failed": 0,
+    "network_disabled": true,
+    "credentials_mounted": false,
+    "existing_image_reused": true,
+    "test_resources_cleaned": true,
+    "online_service_unchanged": true,
+    "external_message_sends": 0
+  },
+  "public_safety": {
+    "export_uses_file_allowlist": true,
+    "real_tokens_or_webhook_keys_included": false,
+    "real_account_or_host_identifiers_included": false,
+    "ssh_material_included": false,
+    "logs_state_or_message_history_included": false,
+    "credential_template_values": "empty",
+    "code_identifiers_and_config_keys": "English",
+    "pattern_scan_and_manual_fixture_review": "passed"
+  },
+  "limits": [
+    "Synthetic offline tests are not end-to-end live delivery validation",
+    "No Git push, repository publication or service deployment was performed",
+    "The parent repository must choose the final location and applicable license",
+    "The relay currently supports one fixed Slack DM and skips startup/reconnect backlog",
+    "Images are limited to directly attached hosted PNG/JPEG files within documented bounds"
+  ]
+}

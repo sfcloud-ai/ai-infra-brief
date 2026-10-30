@@ -1,0 +1,2 @@
+# 标准运行依赖锁随应用一起打包；此处只保留统一入口。
+-r ai_brief/resources/requirements.lock

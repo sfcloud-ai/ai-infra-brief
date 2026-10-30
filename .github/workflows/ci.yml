@@ -1,0 +1,41 @@
+name: mock-only-tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 不使用部署、凭据、定时触发、pull_request_target 或自托管运行器。
+permissions:
+  contents: read
+
+concurrency:
+  group: mock-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # 固定 v4.2.2 提交
+        with:
+          persist-credentials: false
+      - name: Isolated dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --only-binary=:all: -r requirements-dev.lock
+      - name: Compile, unit tests, and offline wheel installation regression
+        run: |
+          .venv/bin/python -m compileall -q ai_brief tests
+          .venv/bin/python -m unittest discover -s tests -v
+      - name: Offline relay tests with required local Unix socket coverage
+        run: .venv/bin/python -B integrations/slack_wecom/run_tests.py --require-unix-socket
+      - name: Public source safety scan
+        run: .venv/bin/python -B scripts/check_public_tree.py
+      - name: Zero-item dry run and idempotent local simulation
+        run: |
+          .venv/bin/python -m ai_brief --state-dir /tmp/ai-brief-ci run --as-of 2026-10-30T08:00:00+08:00 --allow-backfill
+          .venv/bin/python -m ai_brief --state-dir /tmp/ai-brief-ci simulate-delivery --date 2026-10-30
+          .venv/bin/python -m ai_brief --state-dir /tmp/ai-brief-ci simulate-delivery --date 2026-10-30

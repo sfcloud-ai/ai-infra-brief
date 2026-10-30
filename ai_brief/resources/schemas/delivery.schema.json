@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "mode": {
+      "const": "simulation"
+    },
+    "key": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "brief_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "destination": {
+      "const": "local-mock"
+    },
+    "status": {
+      "enum": [
+        "prepared",
+        "in_flight",
+        "simulated",
+        "uncertain"
+      ]
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "receipt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "mode",
+    "key",
+    "brief_sha256",
+    "destination",
+    "status",
+    "attempts",
+    "updated_at",
+    "receipt",
+    "last_error"
+  ]
+}

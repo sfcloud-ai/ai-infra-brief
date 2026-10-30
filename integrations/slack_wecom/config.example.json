@@ -1,0 +1,8 @@
+{
+  "team_id": "TEXAMPLE",
+  "user_id": "UEXAMPLE",
+  "channel_id": "DEXAMPLE",
+  "sender_id": "USENDER",
+  "poll_seconds": 60,
+  "forward_images": false
+}
