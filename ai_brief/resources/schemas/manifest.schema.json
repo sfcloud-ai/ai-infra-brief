@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "timezone": {
+      "const": "Asia/Shanghai"
+    },
+    "mode": {
+      "const": "mock"
+    },
+    "as_of": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "const": "dry_run_complete"
+    },
+    "input_fingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "prompt_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "research.md": {
+          "type": "string"
+        },
+        "editor.md": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "research.md",
+        "editor.md"
+      ]
+    },
+    "window_attempts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hours": {
+            "type": "integer"
+          },
+          "qualified_items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "hours",
+          "qualified_items"
+        ]
+      }
+    },
+    "exclusions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "future": {
+          "type": "integer"
+        },
+        "stale": {
+          "type": "integer"
+        },
+        "duplicate_history": {
+          "type": "integer"
+        },
+        "duplicate_current": {
+          "type": "integer"
+        },
+        "trimmed": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "future",
+        "stale",
+        "duplicate_history",
+        "duplicate_current",
+        "trimmed"
+      ]
+    },
+    "history_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "brief.json": {
+          "type": "string"
+        },
+        "brief.md": {
+          "type": "string"
+        },
+        "overview.svg": {
+          "type": "string"
+        },
+        "inputs.json": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "brief.json",
+        "brief.md",
+        "overview.svg",
+        "inputs.json"
+      ]
+    },
+    "real_adapter_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "research": {
+          "const": "not_connected"
+        },
+        "editor": {
+          "const": "not_connected"
+        },
+        "delivery": {
+          "const": "not_connected"
+        }
+      },
+      "required": [
+        "research",
+        "editor",
+        "delivery"
+      ]
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "real_status": {
+          "const": "not_sent"
+        },
+        "simulation_ledger": {
+          "const": "delivery.simulation.json"
+        }
+      },
+      "required": [
+        "real_status",
+        "simulation_ledger"
+      ]
+    },
+    "implementation_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "date",
+    "timezone",
+    "mode",
+    "as_of",
+    "created_at",
+    "status",
+    "input_fingerprint",
+    "prompt_hashes",
+    "window_attempts",
+    "exclusions",
+    "history_files",
+    "artifacts",
+    "real_adapter_status",
+    "delivery",
+    "implementation_sha256"
+  ]
+}

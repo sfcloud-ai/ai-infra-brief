@@ -1,0 +1,4 @@
+-r requirements.lock
+# 离线 wheel 安装回归所需的构建工具。
+setuptools==84.2.1
+wheel==0.48.0

@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "source_manifest": "SOURCE_EXPORT.json",
+  "runtime_changes": ["自动晨报接受 file_share 子类型；仍要求固定发送者、匹配标题、根消息且未经编辑。", "本地 HTTP 请求在解析请求行和请求头之前设置套接字超时。", "图片下载在服务主线程通过 POSIX 定时器施加覆盖阻塞读取的总超时；已有定时器时失败关闭。"],
+  "non_runtime_changes": ["注释与文档字符串改为中文，英文标识符不变。", "增加离线审计测试入口与主项目数据适配契约。"],
+  "original_ast_sha256_without_docstrings": {
+    "relay.py": "4a9199a5f30cab9b3c928c8156e7cc793d86eb87ba5c1666b8c3ead7f859bf03",
+    "images.py": "dc795d1c0d91d5b45b5aeb120022214bc472540c47b16965439be9ca453880c1",
+    "test_relay.py": "bb8e63497c6f62db1a40f5c0c4ee1574fb65e022489700944e90250d16dc2f0a",
+    "test_images.py": "b97f8065709a911a86d79d25d543035a8f817e207c6938d6775b3a5045ac53b6"
+  },
+  "external_send_executed": false,
+  "deployment_executed": false,
+  "real_research_and_slack_publisher": "not_connected"
+}

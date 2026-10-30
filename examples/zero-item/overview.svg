@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="390" viewBox="0 0 720 390" role="img" aria-labelledby="title desc">
+<title id="title">AI Infra 模拟筛选结果</title>
+<desc id="desc">仅显示模拟输入的条目计数，不是实测性能图，也不代表真实新闻数量。</desc>
+<rect width="720" height="390" fill="#122332"/>
+<g fill="#edf7fa" font-family="sans-serif">
+<text x="32" y="44" font-size="25">AI Infra · 2026-10-30 · 模拟</text>
+<text x="32" y="77" font-size="15">筛选窗口 168 小时 · 来源未联网核验</text>
+<text x="32" y="132" font-size="18">模型服务</text>
+<rect x="300" y="111" width="0" height="28" rx="5" fill="#66d9c6"/>
+<text x="315" y="132" font-size="18">0 项</text>
+<text x="32" y="202" font-size="18">制造业具身训练</text>
+<rect x="300" y="181" width="0" height="28" rx="5" fill="#66d9c6"/>
+<text x="315" y="202" font-size="18">0 项</text>
+<text x="32" y="272" font-size="18">其他直接相关基础设施</text>
+<rect x="300" y="251" width="0" height="28" rx="5" fill="#66d9c6"/>
+<text x="315" y="272" font-size="18">0 项</text>
+<text x="32" y="332" font-size="15">模型服务优先；不假设跨模型共享权重。</text>
+<text x="32" y="359" font-size="15">本图仅为流程验证；不代表真实晨报或性能结论。</text>
+</g></svg>

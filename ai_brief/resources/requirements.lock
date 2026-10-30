@@ -1,0 +1,8 @@
+# 下列版本已在本地 Python 3.12.14 执行环境中验证。
+# 完整分发文件哈希锁与干净环境联网安装仍是上线前验收项。
+attrs==26.1.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+typing-extensions==4.16.0

@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "mode": "mock",
+  "items": [],
+  "notes": ["本地零项 fixture；未进行真实检索，不能据此判断今天没有新闻。"]
+}
