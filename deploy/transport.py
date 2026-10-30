@@ -60,7 +60,7 @@ def main():
                                     os.environ["T4_SSH_PORT"], key, known, os.environ["GITHUB_SHA"], checksum,
                                     int(os.environ["GITHUB_RUN_NUMBER"]), remote)
             result = subprocess.run(command, stdin=stream or subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, timeout=900, env=environment)
+                                    stderr=subprocess.PIPE, timeout=10920, env=environment)
             if result.returncode:
                 raise RuntimeError("ssh_operation_failed_check_private_host_audit")
             return json.loads(result.stdout)

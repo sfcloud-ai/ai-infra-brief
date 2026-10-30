@@ -221,24 +221,33 @@ class DockerDriver:
             return legacy["release"]
         return None
 
-    def status(self, release, operation="status"):
+    def status(self, release, operation="status", deadline=None, nonce=None):
+        # 宿主先定截止时间，容器内残留的 exec 不能因启动较晚而延长授权。
+        if deadline is None:
+            deadline = time.monotonic() + (180 if operation == "activate" else 1800)
         if self.running_release() != release:
             raise ServiceError("running_release_mismatch")
-        result = self.command(["exec", self.live["container"], "python", "/control/runtime.py", "control",
-                               "--root", "/relay", "--code", self.code(release), "--release", release,
-                               "--operation", operation], timeout=90)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ServiceError("control_deadline")
+        arguments = ["exec", self.live["container"], "python", "/control/runtime.py", "control",
+                     "--root", "/relay", "--code", self.code(release), "--release", release,
+                     "--operation", operation, "--deadline", repr(deadline)]
+        if nonce is not None:
+            arguments += ["--activation-nonce", nonce]
+        result = self.command(arguments, timeout=remaining + 15)
         return json.loads(result.stdout)
 
     def wait(self, release, active=False):
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + (1800 if active else 180)
         while time.monotonic() < deadline:
             try:
-                status = self.status(release)
+                status = self.status(release, deadline=deadline)
                 if (status.get("phase") == ("active" if active else "paused")
                         and status.get("reconciled") is True and status.get("in_flight") is False
                         and (not active or status.get("successful_polls", 0) >= 1)):
                     return
-            except (ServiceError, ValueError):
+            except (ServiceError, ValueError, subprocess.TimeoutExpired):
                 pass
             time.sleep(0.25)
         raise ServiceError("relay_health_deadline")
@@ -250,9 +259,17 @@ class DockerDriver:
         self.wait(release, active=True)
         write_json(self.activation / "active.json", {"release": release})
         os.chmod(self.activation / "active.json", 0o444)
+        self.revoke_permit()
+
+    def revoke_permit(self):
+        write_json(self.activation / "permit.json", {"release": None, "nonce": None})
+        os.chmod(self.activation / "permit.json", 0o444)
 
     def activate(self, release):
-        result = self.status(release, "activate")
+        nonce = uuid.uuid4().hex
+        write_json(self.activation / "permit.json", {"release": release, "nonce": nonce})
+        os.chmod(self.activation / "permit.json", 0o444)
+        result = self.status(release, "activate", nonce=nonce)
         if result.get("phase") != "active" or result.get("reconciled") is not True:
             raise ServiceError("relay_activation_failed")
 
@@ -264,11 +281,13 @@ class DockerDriver:
         if managed:
             if managed != release:
                 raise ServiceError("unexpected_active_instance")
-            # 在请求暂停前撤销自动激活，期间重启的容器只能以暂停模式启动。
+            # 同时撤销迟到请求和自动重启的授权，然后才请求排空。
+            self.revoke_permit()
             write_json(self.activation / "active.json", {"release": None})
             os.chmod(self.activation / "active.json", 0o444)
             result = self.status(release, "pause")
-            if result.get("phase") != "paused" or result.get("reconciled") is not True:
+            if (result.get("phase") != "paused" or result.get("reconciled") is not True
+                    or result.get("in_flight") is not False):
                 raise ServiceError("unreconciled_delivery_blocks_stop")
             self.command(["update", "--restart=no", self.live["container"]])
             self.command(["stop", "--time", "30", self.live["container"]], timeout=40)
@@ -302,6 +321,7 @@ class DockerDriver:
         if self.inspect(self.live["container"]):
             self.command(["rm", self.live["container"]])
         (self.activation / "active.json").unlink(missing_ok=True)
+        self.revoke_permit()
         self.command(["run", "-d", "--pull", "never", "--name", self.live["container"],
                       "--label", "sfcloud.ai.service=ai-infra-brief", "--label", "sfcloud.ai.release=" + release,
                       "--restart", "unless-stopped", "--network", "bridge"] + self.common()

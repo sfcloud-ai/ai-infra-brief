@@ -1,6 +1,7 @@
 """单实例受控入口：就绪后暂停投递，显式激活，暂停响应即完成当前工作。"""
 
 import argparse
+import math
 import importlib.util
 import json
 import os
@@ -16,9 +17,9 @@ import time
 from types import SimpleNamespace
 
 if __package__:
-    from .resume import assert_reconciled, binding, resume_class
+    from .resume import RetryableReadError, assert_reconciled, binding, resume_class
 else:
-    from resume import assert_reconciled, binding, resume_class
+    from resume import RetryableReadError, assert_reconciled, binding, resume_class
 
 
 def load_module(code=None):
@@ -102,7 +103,9 @@ def check_state(module, root):
 
 
 class ControlledRelay:
-    def __init__(self, module, receiver, release):
+    def __init__(self, module, receiver, release, activation_file=None):
+        self.activation_file = activation_file
+        self.revoked_nonce = None
         self.module, self.receiver, self.release = module, receiver, release
         self.phase = "paused"
         self.polls = 0
@@ -111,18 +114,49 @@ class ControlledRelay:
         assert_reconciled(self.receiver.store)
         self.receiver.slack.newer(self.receiver.store.get("cursor"))
 
+    def deadline(self, payload):
+        deadline = payload.get("deadline")
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not time.monotonic() < deadline <= time.monotonic() + 1800):
+            raise self.module.RelayError("control_request_expired", 409)
+
+    def permit(self):
+        path = self.activation_file.with_name("permit.json")
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022):
+            raise self.module.RelayError("unsafe_activation_permit", 409)
+        return json.loads(path.read_text())
+
+    def authorized(self, payload):
+        self.deadline(payload)
+        if self.activation_file is not None:
+            nonce = payload.get("nonce")
+            if (not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32}", nonce)
+                    or nonce == self.revoked_nonce
+                    or self.permit() != {"release": self.release, "nonce": nonce}):
+                raise self.module.RelayError("activation_permit_revoked", 409)
+
     def dispatch(self, path, payload, uid):
         if uid != os.getuid():
             raise self.module.RelayError("forbidden", 403)
         if path.startswith("/control/"):
-            if payload != {"release": self.release}:
+            if (not isinstance(payload, dict) or set(payload) != {"release", "deadline", "nonce"}
+                    or payload["release"] != self.release):
                 raise self.module.RelayError("release_mismatch", 409)
+            # 在任何状态变更前拒绝过期请求，避免失去客户端的旧操作迟到生效。
+            self.deadline(payload)
             operation = path.removeprefix("/control/")
             if operation == "pause":
                 self.phase = "paused"
+                if self.activation_file is not None:
+                    self.revoked_nonce = self.permit().get("nonce")
             elif operation == "activate":
+                self.authorized(payload)
                 self.phase = "paused"
                 self.ready()
+                # readiness 可以等待网络；返回后再次确认调用期限和 root 授权。
+                self.authorized(payload)
                 self.polls = 0
                 self.phase = "active"
             elif operation != "status":
@@ -137,14 +171,29 @@ class ControlledRelay:
                     "reconciled": reconciled, "successful_polls": self.polls}
         if self.phase != "active" and path != "/status":
             raise self.module.RelayError("delivery_paused", 409)
-        return self.receiver.dispatch(path, payload, uid)
+        if path == "/status":
+            return self.receiver.dispatch(path, payload, uid)
+        try:
+            assert_reconciled(self.receiver.store)
+            return self.receiver.dispatch(path, payload, uid)
+        finally:
+            # 手动投递也共享账本；未知回执不能等到下一次轮询才阻断发送。
+            try:
+                assert_reconciled(self.receiver.store)
+            except Exception:
+                self.phase = "paused"
 
     def poll(self):
         if self.phase == "active":
             try:
-                self.receiver.poll()
+                assert_reconciled(self.receiver.store)
+                processed = self.receiver.poll()
                 assert_reconciled(self.receiver.store)
                 self.polls += 1
+                return processed
+            except RetryableReadError:
+                self.polls = 0
+                raise
             except Exception:
                 self.phase = "paused"
                 raise
@@ -161,7 +210,7 @@ def serve(module, root, release, activation_file=None):
             assert_reconciled(store)
             receiver = resume_class(module)(store, slack, module.WeCom(credentials["wecom_webhook"]), config)
             receiver.baseline()
-            controller = ControlledRelay(module, receiver, release)
+            controller = ControlledRelay(module, receiver, release, activation_file)
             controller.ready()
             if activation_file and activation_file.exists():
                 info = activation_file.lstat()
@@ -192,11 +241,15 @@ def serve(module, root, release, activation_file=None):
                         server.handle_request()
                         if not stopping and controller.phase == "active" and time.monotonic() >= next_poll:
                             try:
-                                controller.poll()
+                                processed = controller.poll()
+                            except RetryableReadError:
+                                print('{"event":"history_read_retry"}', flush=True)
+                                next_poll = time.monotonic() + min(config["poll_seconds"], 30)
                             except Exception:
                                 controller.phase = "paused"
                                 print('{"event":"delivery_paused_requires_reconcile"}', flush=True)
-                            next_poll = time.monotonic() + config["poll_seconds"]
+                            else:
+                                next_poll = time.monotonic() + (0 if processed else config["poll_seconds"])
             finally:
                 signal.signal(signal.SIGTERM, previous)
                 socket_path.unlink(missing_ok=True)
@@ -204,12 +257,15 @@ def serve(module, root, release, activation_file=None):
             store.db.close()
 
 
-def control(module, root, operation, release):
+def control(module, root, operation, release, deadline, nonce=None):
     module.secure_dir(root / "run")
+    if deadline is None or not math.isfinite(deadline) or not time.monotonic() < deadline <= time.monotonic() + 1800:
+        raise ValueError("control_request_expired")
     connection = module.UnixConnection(root / "run/relay.sock")
+    connection.timeout = deadline - time.monotonic()
     try:
         connection.request("POST", "/control/" + operation,
-                           body=json.dumps({"release": release}), headers={"Content-Type": "application/json"})
+                           body=json.dumps({"release": release, "deadline": deadline, "nonce": nonce}), headers={"Content-Type": "application/json"})
         response = connection.getresponse()
         result = json.loads(response.read(8192))
         if response.status != 200 or result.get("release") != release:
@@ -228,6 +284,8 @@ def main():
     parser.add_argument("--release")
     parser.add_argument("--operation", choices=("status", "pause", "activate"))
     parser.add_argument("--activation-file", type=Path)
+    parser.add_argument("--deadline", type=float)
+    parser.add_argument("--activation-nonce")
     args = parser.parse_args()
     module = load_module(args.code)
     if args.command == "capabilities":
@@ -246,7 +304,7 @@ def main():
     if args.command == "control":
         if not args.operation:
             raise ValueError("operation_required")
-        control(module, args.root, args.operation, args.release)
+        control(module, args.root, args.operation, args.release, args.deadline, args.activation_nonce)
     else:
         serve(module, args.root, args.release, args.activation_file)
 

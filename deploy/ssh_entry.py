@@ -21,7 +21,7 @@ if __name__ == "__main__":
     try:
         command = parse_command(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
         result = subprocess.run(["/usr/bin/sudo", "-n", "/usr/local/lib/ai-brief-control/stage_helper.py", *command],
-                                stdin=sys.stdin.buffer, timeout=900, env={"PATH": "/usr/bin:/bin"})
+                                stdin=sys.stdin.buffer, timeout=10800, env={"PATH": "/usr/bin:/bin"})
         raise SystemExit(result.returncode)
     except (ValueError, OSError, subprocess.SubprocessError):
         print("restricted_deployment_rejected", file=sys.stderr)

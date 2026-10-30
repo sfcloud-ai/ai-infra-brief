@@ -1,7 +1,15 @@
 """交接适配器：沿用游标和去重账本，不改变旧入口默认启动语义。"""
 
+from collections import deque
+import decimal
 import hashlib
 import json
+import os
+
+
+class RetryableReadError(Exception):
+    """仅表示尚未开始投递的历史读取失败，可保留游标稍后重试。"""
+
 
 
 def binding(config):
@@ -11,6 +19,10 @@ def binding(config):
 
 def resume_class(module):
     class ResumeRelay(module.Relay):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.pending_messages = deque()
+
         def baseline(self):
             # 此绑定只能在首次停止旧实例、备份并核对配置后写入，不能自动认领旧游标。
             if self.store.get("handoff_binding_v1") != binding(self.config):
@@ -19,6 +31,34 @@ def resume_class(module):
             if not isinstance(cursor, str) or not module.TS.fullmatch(cursor):
                 raise module.RelayError("handoff_cursor_required", 409)
             self.connected = True
+
+        def poll(self):
+            if not self.connected:
+                self.baseline()
+            if not self.pending_messages:
+                try:
+                    self.pending_messages.extend(self.slack.newer(self.store.get("cursor")))
+                except module.RelayError as error:
+                    if error.code in {"slack_request_failed", "slack_api_rejected"}:
+                        raise RetryableReadError("history_read_retry") from None
+                    raise
+            # 批次只读一次；每轮至多处理一条，让控制请求在消息之间获得执行机会。
+            while self.pending_messages:
+                message = self.pending_messages[0]
+                timestamp = message.get("ts", "")
+                if not module.TS.fullmatch(timestamp):
+                    raise module.RelayError("invalid_slack_timestamp", 502)
+                if decimal.Decimal(timestamp) <= decimal.Decimal(self.store.get("cursor")):
+                    self.pending_messages.popleft()
+                    continue
+                if self.is_brief(message):
+                    self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
+                                 module.message_text(message), timestamp, "auto", os.getuid(),
+                                 image_plans=self.image_plans(message))
+                self.store.set("cursor", timestamp)
+                self.pending_messages.popleft()
+                return True
+            return False
 
     return ResumeRelay
 
