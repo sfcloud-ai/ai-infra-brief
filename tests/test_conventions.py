@@ -60,9 +60,11 @@ class ConventionTests(unittest.TestCase):
             inspect(json.loads(path.read_text()), path)
 
     def test_readme_documents_language_policy(self):
-        text = (ROOT / "README.md").read_text()
-        self.assertIn("README 和代码注释使用中文", text)
-        self.assertIn("变量、函数、类名和配置项使用英文", text)
+        # 检查长期语言约定，不依赖 README 的固定句式或阶段性验证记录。
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?:README|文档)[^\n。]*中文")
+        self.assertRegex(text, r"注释[^\n。]*中文")
+        self.assertRegex(text, r"标识符[^\n。]*英文")
 
 
 if __name__ == "__main__":

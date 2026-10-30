@@ -1,61 +1,94 @@
 # AI Infra 晨报
 
-AI Infra 晨报的规则、离线生成工具与 Slack → 企业微信转发器。
+AI Infra 晨报将研究规则、编辑规则、历史去重、报告生成和投递状态分开管理。项目关注模型服务基础设施，以及制造业具身相关的训练技术；规则位于 `ai_brief/resources/prompts/`。
 
-- 晨报工具按上海时区生成 Markdown、JSON 和 SVG，支持历史去重和本地模拟投递。
-- 研究与编辑规则保存在 Prompt 文件中，与配置、代码一起版本化和打包。
-- 转发器将指定 Slack 私信中的晨报正文和 PNG/JPEG 附件转发到企业微信。
-- GitHub Actions 支持主线发布、单实例切换和受控回滚。
+晨报流水线提供本地 **mock/simulation** 模式：默认使用空 fixture，生成 JSON、Markdown 和 SVG，不联网、不调用真实模型、不读取发送凭据，也不会发布消息或创建调度。真实研究、语义去重和 Slack 上传／发布接口尚未接入；`live` 或未知 adapter 会报错，不会自动降级为 mock。
 
-晨报命令使用本地 fixture，不联网采集、调用模型或发送消息；默认 fixture 为空。真实消息转发使用独立的转发器入口和私有配置。
+仓库另含独立的 [Slack → 企业微信转发器](integrations/slack_wecom/README.md)。其服务命令会读取私有配置并联网，需单独配置和启动；运行晨报流水线不会启动它。
 
-## 快速开始
+Python 分发名为 `sfcloud-ai`，模块名为 `ai_brief`，安装后的命令为 `ai-brief`。项目使用 [Apache License 2.0](LICENSE)。文档与代码注释使用中文；变量、函数、类名、配置项等标识符使用英文。
 
-使用 Linux 和 Python 3.12：
+## 安装
+
+使用 Linux 和 Python 3.11 或更高版本。流水线依赖 POSIX `flock`；独立转发器还依赖 Linux Unix socket 和 UID 校验，不能直接在 Windows 上运行。
+
+在源码目录安装运行依赖：
 
 ```bash
+cd ai-infra-brief
+umask 077
 python3 -m venv .venv
-.venv/bin/python -m pip install --only-binary=:all: -r requirements-dev.lock
+.venv/bin/python -m pip install --only-binary=:all: -r requirements.lock
+```
 
-# 生成当日模拟晨报
+需要安装为命令行工具时，先安装构建依赖，再构建并安装 wheel：
+
+```bash
+.venv/bin/python -m pip install --only-binary=:all: -r requirements-dev.lock
+.venv/bin/python -m pip wheel --no-deps --no-build-isolation . -w /tmp/sfcloud-wheels
+.venv/bin/python -m pip install --no-deps /tmp/sfcloud-wheels/sfcloud_ai-0.1.0-py3-none-any.whl
+```
+
+安装后可从其他目录运行 `/absolute/path/to/.venv/bin/ai-brief`。prompt、配置和 schema 随 wheel 打包；修改这些资源后需重新构建并安装。转发器及受控运行入口也随该 wheel 打包，受控命令为 `ai-brief-relay`。
+
+## 配置
+
+| 位置或参数 | 用途 |
+| --- | --- |
+| `ai_brief/resources/config.json` | 时区、研究窗口、目标条数和历史天数 |
+| `ai_brief/resources/prompts/research.md` | 来源、时间窗口与研究范围 |
+| `ai_brief/resources/prompts/editor.md` | 编辑、引用、图表与零项结果规则 |
+| `ai_brief/resources/schemas/` | 输入、晨报、manifest 和投递记录的数据格式 |
+| `run --fixture <path>` | 指定模拟输入；默认使用 `fixtures/empty.json` |
+| `--state-dir <path>` | 指定本地运行状态目录，默认 `./var`；放在子命令之前 |
+| `run --history-dir <path>` | 显式读取已有晨报历史 |
+
+运行依赖统一维护在 `ai_brief/resources/requirements.lock`，根目录 `requirements.lock` 引用它。状态目录和历史可能包含私人内容，应限制访问权限，不加入 Git。
+
+## 用法
+
+### 生成晨报与模拟投递
+
+```bash
+# 按 Asia/Shanghai 当日生成本地模拟报告。
 .venv/bin/python -m ai_brief --state-dir ./var run
 
-# 写入本地模拟回执，重复执行不会重复投递
+# 仅写入本地模拟回执；重复执行复用同一回执。
 .venv/bin/python -m ai_brief --state-dir ./var simulate-delivery
 ```
 
-报告保存在 `var/runs/<日期>/`，模拟回执保存在 `var/mock-outbox/`。同一天重复运行会复用已有报告；输入或规则变更后需要使用新的状态目录。历史回放可通过 `run --as-of <带时区的时间> --date <日期> --allow-backfill` 指定单日。
+报告写入 `var/runs/YYYY-MM-DD/`，包含 `inputs.json`、`brief.json`、`brief.md`、`overview.svg` 和 `manifest.json`。模拟投递记录为 `delivery.simulation.json`，回执位于 `var/mock-outbox/`。报告带有模拟标记；`simulated` 只表示本地回执，`real_status` 为 `not_sent`。
 
-可用 `run --history-dir <目录>` 读取已有晨报。历史文件支持符合 schema 的 JSON，以及路径中带日期的 Markdown；程序按 URL 和事件键去重。
+同一日期再次运行会复用原快照。输入、规则或实现变化，以及产物被修改时，程序拒绝覆盖；需要重新实验时使用新的状态目录。退出码 `0` 表示成功或幂等复用，`2` 表示校验、状态或配置错误。
 
-## 规则与配置
+投递状态为 `prepared → in_flight → simulated`。异常或中断可能留下 `uncertain` 或 `in_flight`，程序不会自动重发，应先核对记录。代码回滚不能用恢复旧账本的方式重置投递状态。
 
-| 文件 | 用途 |
-| --- | --- |
-| [research.md](ai_brief/resources/prompts/research.md) | 研究范围、来源和时间窗口 |
-| [editor.md](ai_brief/resources/prompts/editor.md) | 编辑标准、引用和图表要求 |
-| [config.json](ai_brief/resources/config.json) | 时区、窗口、条数和历史范围 |
-| [schemas](ai_brief/resources/schemas/) | 输入、报告和投递数据格式 |
-
-运行资源随 wheel 安装，修改后重新构建发布。Python 分发名为 `sfcloud-ai`，晨报命令为 `ai-brief`，受控转发器命令为 `ai-brief-relay`。
-
-## 转发与部署
-
-- [转发器用法](integrations/slack_wecom/README.md)：Slack 和企业微信配置、正文与图片转发、手动入口。
-- [T4 部署](deploy/README.md)：GitHub Secrets/Variables、主线自动部署和回滚。
-- [状态管理](DEPLOYMENT.md)：规则更新、运行数据与账本的版本边界。
-
-地址、密钥、运行状态和私人历史保存在仓库之外。T4 连接信息在 GitHub 仓库设置中配置，无须每次触发时填写。
-
-## 开发
+### 指定日期的模拟运行
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -B integrations/slack_wecom/run_tests.py --require-unix-socket
+.venv/bin/python -m ai_brief --state-dir ./var/replay run \
+  --as-of 2026-10-30T08:00:00+08:00 --date 2026-10-30 --allow-backfill
+.venv/bin/python -m ai_brief --state-dir ./var/replay simulate-delivery --date 2026-10-30
 ```
 
-README 和代码注释使用中文；变量、函数、类名和配置项使用英文。
+`--date` 必须等于 `--as-of` 对应的 UTC+8 日期。非当日运行必须显式指定 `--allow-backfill`；一次只处理一个日期，不自动补跑缺失日。
 
-## 许可
+### 使用已有历史
 
-[Apache License 2.0](LICENSE)。
+```bash
+.venv/bin/python -m ai_brief --state-dir ./var run --history-dir /path/to/brief-history
+```
+
+默认读取同一状态目录最近 14 天的 `brief.json`。外部历史目录支持符合 brief schema 的 JSON，以及路径带 `YYYY-MM-DD` 或 `YYYYMMDD` 日期的 Markdown；程序读取全文、链接和事件键进行去重。无日期 Markdown、错误 schema、不可读或超过 1 MB 的文件会报错。不会自动导入聊天、Slack 或 Library 历史。
+
+### 接入独立转发器
+
+`ai_brief.relay_contract.prepare_relay_preview` 可将符合 schema 的晨报转换为离线事件模板，首行规范为 `AI Infra 晨报 · 日期`。`event_template` **不是 Slack 发布 API 参数**，`delivery_allowed` 始终为 `false`，调用它不会上传或发送消息。
+
+独立转发器接收固定 Slack 私信、固定发送者的晨报及直接附带的 PNG/JPEG 图片。流水线生成的 SVG 需要先转成 PNG/JPEG，再通过独立实现的 Slack 上传和发布步骤交给转发器。转发器的凭据配置、服务启动、手动入口和投递边界见 [模块用法](integrations/slack_wecom/README.md)。
+
+## 自动部署与回滚
+
+T4 的连接信息在 GitHub 仓库设置中配置，地址和密钥使用 `t4-production` Environment Secrets，端口使用 Environment Variable。仓库变量 `CD_ENABLED` 控制自动发布开关；环境仅允许 `main` 分支。
+
+主线更新可通过 Actions 发布代码、Prompt 和配置。转发器采用单实例切换，升级和回滚沿用同一游标与投递账本。配置、首次交接和回滚操作见 [T4 部署](deploy/README.md)，状态的版本边界见 [状态管理](DEPLOYMENT.md)。
