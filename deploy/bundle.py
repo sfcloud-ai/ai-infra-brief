@@ -36,13 +36,16 @@ def make_bundle(commit, wheel_dir, lock_path, output):
         pieces = path.name.split("-")
         identity = tuple(pieces[:2])
         data = path.read_bytes()
-        if identity[0] == "sfcloud_ai":
+        if identity[0] == "sfcloud_ai_relay":
             apps.append(path.name)
-            # 包内路径也必须是普通文件；wheel 的入口和资源由打包回归验证。
+            # 仅接收转发包；研究 Prompt 和晨报流水线不进入 T4 发布。
             with zipfile.ZipFile(path) as archive:
                 for item in archive.infolist():
                     if item.filename.startswith("/") or ".." in item.filename.split("/"):
                         raise ValueError("invalid_wheel_path")
+                    if not (item.filename.startswith("ai_brief_relay/")
+                            or re.match(r"sfcloud_ai_relay-[^/]+\.dist-info/", item.filename)):
+                        raise ValueError("unexpected_relay_wheel_content")
         elif identity not in expected or digest(data) != expected[identity] or identity in seen:
             raise ValueError("dependency_hash_or_identity_mismatch")
         else:

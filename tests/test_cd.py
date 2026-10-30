@@ -36,8 +36,8 @@ class ReleaseTests(unittest.TestCase):
         wheels = self.root / "bundle-wheels"
         if not wheels.exists():
             wheels.mkdir()
-            with zipfile.ZipFile(wheels / "sfcloud_ai-0.1.0-py3-none-any.whl", "w") as archive:
-                archive.writestr("ai_brief/__init__.py", "")
+            with zipfile.ZipFile(wheels / "sfcloud_ai_relay-0.1.0-py3-none-any.whl", "w") as archive:
+                archive.writestr("ai_brief_relay/__init__.py", "")
             (self.root / "runtime.lock").write_text("")
         path = self.root / filename
         checksum = make_bundle("a" * 40, wheels, self.root / "runtime.lock", path)

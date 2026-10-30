@@ -30,9 +30,13 @@
 
 固定控制层不随应用 CD 更新；修改控制层需要单独审查并由管理员安装。应用在非 root 容器运行，代码和配置只读，只有 `state`、`run` 可写。部署账户不能直接读取转发凭据或修改受保护的发布目录。
 
+启用转发器独立发布包前，由管理员一并更新固定控制层。受限 `status` 必须返回 `receiver_format: relay-only-v1`，该标识由已安装的接收器提供。Actions 在上传前检查此能力；旧接收器会返回 `administrator_receiver_upgrade_required`，不接收新包。
+
 ## 发布
 
-将仓库变量 `CD_ENABLED` 设为 `true` 后，每次 main push 都执行发布流程，包括 Python、Prompt 和配置变更。工作流构建事件对应的提交，并在传输前确认它仍是 main 的当前版本。
+将仓库变量 `CD_ENABLED` 设为 `true` 后，main 中 Python 代码、部署配置、依赖锁定文件或工作流变更会执行发布。工作流构建事件对应的提交，在传输前核对主线部署输入；后续只有 Prompt 或文档变化时继续发布，后续代码已变化时拒绝旧构建。
+
+T4 使用独立的 `sfcloud-ai-relay` wheel，只包含转发器和受控运行入口。日报任务每次从 GitHub main 读取研究和编辑 Prompt；Prompt 不放入 T4 发布包，单独修改 Prompt 或文档也不会触发部署。
 
 ```text
 main push → 无凭据测试 → 构建 wheel 与离线依赖包

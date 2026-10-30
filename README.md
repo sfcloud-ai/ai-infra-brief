@@ -91,4 +91,6 @@ python3 -m venv .venv
 
 T4 的连接信息在 GitHub 仓库设置中配置，地址和密钥使用 `t4-production` Environment Secrets，端口使用 Environment Variable。仓库变量 `CD_ENABLED` 控制自动发布开关；环境仅允许 `main` 分支。
 
-主线更新可通过 Actions 发布代码、Prompt 和配置。转发器采用单实例切换，升级和回滚沿用同一游标与投递账本。配置、首次交接和回滚操作见 [T4 部署](deploy/README.md)，状态的版本边界见 [状态管理](DEPLOYMENT.md)。
+主线 Python 和部署配置更新通过 Actions 发布转发器，采用单实例切换，升级和回滚沿用同一游标与投递账本。配置、首次交接和回滚操作见 [T4 部署](deploy/README.md)，状态的版本边界见 [状态管理](DEPLOYMENT.md)。
+
+日报任务每次运行从 GitHub 主线读取 [研究 Prompt](https://github.com/sfcloud-ai/ai-infra-brief/blob/main/ai_brief/resources/prompts/research.md) 和 [编辑 Prompt](https://github.com/sfcloud-ai/ai-infra-brief/blob/main/ai_brief/resources/prompts/editor.md)。T4 部署包只包含转发器；单独修改 Prompt 或文档不会触发 T4 部署。

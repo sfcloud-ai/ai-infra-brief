@@ -13,10 +13,12 @@ import uuid
 
 if __package__:
     from .policy import Policy
+    from .release import RECEIVER_FORMAT
     from .ssh_entry import parse_command
     from .supervisor import DockerDriver, ServiceError, Supervisor
 else:
     from policy import Policy
+    from release import RECEIVER_FORMAT
     from ssh_entry import parse_command
     from supervisor import DockerDriver, ServiceError, Supervisor
 
@@ -83,7 +85,7 @@ def execute(command, config, control_root, stage_runner=stage, driver_factory=Do
     policy = Policy(control_root)
     if command == ("status",):
         return {"sequence": policy.value["sequence"], "active": policy.value["active"],
-                "previous": policy.value["previous"]}
+                "previous": policy.value["previous"], "receiver_format": RECEIVER_FORMAT}
     if (Path(control_root) / "switch-pending.json").exists():
         if not config.get("live_enabled"):
             raise ValueError("pending_switch_requires_recovery")

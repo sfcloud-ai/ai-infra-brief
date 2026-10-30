@@ -15,6 +15,10 @@ else:
     from ssh_entry import parse_command
 
 
+class ReceiverUpgradeRequired(RuntimeError):
+    pass
+
+
 def ssh_arguments(host, user, port, key, known_hosts, commit, checksum, sequence=1, command=None):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
         raise ValueError("invalid_host")
@@ -55,12 +59,12 @@ def main():
         # 子进程不继承私钥文本；SSH 错误可能含私有地址，不能回显到公开日志。
         environment = {name: value for name, value in os.environ.items() if not name.startswith("T4_")}
 
-        def invoke(remote=None, stream=None):
+        def invoke(remote=None, stream=None, timeout=10920):
             command = ssh_arguments(os.environ["T4_SSH_HOST"], os.environ["T4_SSH_USER"],
                                     os.environ["T4_SSH_PORT"], key, known, os.environ["GITHUB_SHA"], checksum,
                                     int(os.environ["GITHUB_RUN_NUMBER"]), remote)
             result = subprocess.run(command, stdin=stream or subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, timeout=10920, env=environment)
+                                    stderr=subprocess.PIPE, timeout=timeout, env=environment)
             if result.returncode:
                 raise RuntimeError("ssh_operation_failed_check_private_host_audit")
             return json.loads(result.stdout)
@@ -74,6 +78,9 @@ def main():
             if result.get("status") != "rolled_back" or result.get("commit") != target:
                 raise RuntimeError("rollback_not_confirmed")
         else:
+            status = invoke("status", timeout=60)
+            if not isinstance(status, dict) or status.get("receiver_format") != "relay-only-v1":
+                raise ReceiverUpgradeRequired("administrator_receiver_upgrade_required")
             with path.open("rb") as stream:
                 result = invoke(stream=stream)
             if result.get("status") != "activated" or result.get("commit") != os.environ["GITHUB_SHA"]:
@@ -84,6 +91,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except ReceiverUpgradeRequired:
+        print("administrator_receiver_upgrade_required", file=sys.stderr)
+        raise SystemExit(1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
         print("prototype_release_failed_no_private_details_logged", file=sys.stderr)
         raise SystemExit(1)

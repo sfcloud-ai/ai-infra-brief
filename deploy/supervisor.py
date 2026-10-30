@@ -30,6 +30,9 @@ class Supervisor:
             return
         pending = json.loads(self.pending.read_text())
         before, target = pending["before"], pending["target"]
+        # 只有持久记录证明从未发起激活时，才允许不经控制 socket 终止候选。
+        if pending.get("activation_attempted", True) is False:
+            self.driver.abort_start(target, before)
         running = self.driver.current_sender()
         if running:
             if running not in {before, target}:
@@ -56,7 +59,8 @@ class Supervisor:
         if target == before:
             self.driver.wait_healthy(target)
             return
-        write_json(self.pending, {"before": before, "target": target})
+        pending = {"before": before, "target": target, "activation_attempted": False}
+        write_json(self.pending, pending)
         stopped = False
         try:
             self.driver.quiesce(before)
@@ -64,6 +68,9 @@ class Supervisor:
             self.driver.handoff(target)
             self.driver.start_paused(target)
             self.driver.wait_ready(target)
+            # 先落盘再发激活；中断或应答丢失后都按可能已发送处理。
+            pending["activation_attempted"] = True
+            write_json(self.pending, pending)
             self.driver.activate(target)
             self.driver.wait_healthy(target)
             self.policy.completed(target)
@@ -275,6 +282,36 @@ class DockerDriver:
 
     def handoff(self, release):
         self.one_shot(["handoff", "--root", "/relay", "--code", self.code(release)])
+
+    def abort_start(self, release, before):
+        # 成功查询完整容器清单后才能认定不存在；daemon 或 inspect 失败不能当作已停止。
+        result = self.command(["container", "ls", "--all", "--no-trunc", "--filter",
+                               "name=^/" + re.escape(self.live["container"]) + "$", "--format", "{{.ID}}"])
+        identities = result.stdout.decode().split()
+        if not identities:
+            return
+        if len(identities) != 1 or not re.fullmatch(r"[0-9a-f]{64}", identities[0]):
+            raise ServiceError("unexpected_managed_container_inventory")
+        identity = identities[0]
+        current = json.loads(self.command(["inspect", identity]).stdout)[0]
+        labels = current["Config"].get("Labels") or {}
+        if labels.get("sfcloud.ai.service") != "ai-infra-brief":
+            raise ServiceError("managed_container_name_collision")
+        if labels.get("sfcloud.ai.release") == before:
+            return
+        if labels.get("sfcloud.ai.release") != release:
+            raise ServiceError("unexpected_active_instance")
+        for name in ("active.json", "permit.json"):
+            path = self.activation / name
+            if path.exists() and json.loads(path.read_text()).get("release") == release:
+                raise ServiceError("candidate_activation_not_excluded")
+        self.revoke_permit()
+        self.command(["update", "--restart=no", identity])
+        self.command(["stop", "--time", "30", identity], timeout=40)
+        current = json.loads(self.command(["inspect", identity]).stdout)[0]
+        if any(current["State"].get(name) is not False for name in ("Running", "Restarting", "Paused")):
+            raise ServiceError("candidate_stop_not_confirmed")
+        # 随后的 handoff 使用上一版代码，在独占锁下离线核对账本后再恢复发送。
 
     def quiesce(self, release):
         managed = self.running_release()

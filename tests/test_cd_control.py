@@ -58,6 +58,13 @@ class FakeDriver:
             raise ServiceError("handoff_with_sender_running")
         self.events.append(("handoff", release))
 
+    def abort_start(self, release, before):
+        if self.running == release:
+            if self.phase != "paused":
+                raise ServiceError("candidate_not_paused")
+            self.events.append(("abort_start", release))
+            self.running = None
+
     def start_paused(self, release):
         if self.running:
             raise ServiceError("parallel_sender")

@@ -20,6 +20,9 @@ MAX_CONTENT = 128 * 1024 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
+RECEIVER_FORMAT = "relay-only-v1"
+
+
 class ReleaseError(Exception):
     pass
 
@@ -195,11 +198,6 @@ class Releases:
         release = self.root / "releases" / commit
         if release.is_symlink() or not release.is_dir():
             raise ReleaseError("unsafe_release")
-        with tempfile.TemporaryDirectory(prefix="health-", dir=self.root / "checks") as directory:
-            result = json.loads(self.run([str(release / "venv/bin/python"), "-I", "-m", "ai_brief",
-                                         "--state-dir", directory + "/mock-state", "run"]))
-            if result["manifest"]["delivery"]["real_status"] != "not_sent":
-                raise ReleaseError("unexpected_delivery")
         capabilities = json.loads(self.run([str(release / "venv/bin/python"), "-I", "-m",
                                             "ai_brief_relay.runtime", "capabilities"]))
         if capabilities != {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0}:
