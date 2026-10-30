@@ -64,6 +64,27 @@ class StartupRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.driver.running)
         self.assertTrue((self.root / "switch-pending.json").exists())
 
+    def test_interruption_after_candidate_stop_keeps_pending_and_recovers_once(self):
+        first, second = "a" * 40, "b" * 40
+        self.deploy(10, first)
+        self.driver.fail_ready_once = second
+        original = self.driver.abort_start
+
+        def interrupted(release, before):
+            original(release, before)
+            raise ServiceError("constructed_policy_update_failure")
+
+        with patch.object(self.driver, "abort_start", side_effect=interrupted):
+            with self.assertRaisesRegex(ServiceError, "policy_update_failure"):
+                self.deploy(11, second)
+        self.assertIsNone(self.driver.running)
+        self.assertTrue((self.root / "switch-pending.json").exists())
+        with self.assertRaisesRegex(ServiceError, "interrupted_switch_recovered"):
+            self.deploy(12, "c" * 40)
+        self.assertEqual(self.driver.running, first)
+        self.assertFalse((self.root / "switch-pending.json").exists())
+        self.assertNotIn("c" * 40, self.staged)
+
 
 class CandidateTerminationTests(unittest.TestCase):
     def setUp(self):
@@ -101,8 +122,8 @@ class CandidateTerminationTests(unittest.TestCase):
     def test_restarting_candidate_is_stopped_by_immutable_id_without_socket(self):
         self.abort()
         mutations = [args for args in self.commands if args[0] in {"update", "stop"}]
-        self.assertEqual(mutations, [["update", "--restart=no", self.identity],
-                                     ["stop", "--time", "30", self.identity]])
+        self.assertEqual(mutations, [["stop", "--time", "30", self.identity],
+                                     ["update", "--restart=no", self.identity]])
         self.assertFalse(self.current["State"]["Running"])
         self.assertFalse(self.current["State"]["Restarting"])
 
@@ -139,5 +160,16 @@ class CandidateTerminationTests(unittest.TestCase):
             with self.assertRaisesRegex(ServiceError, "docker_failure"):
                 self.abort()
         self.fail, self.stop_sticks = None, False
+        self.current["State"] = {"Running": False, "Restarting": True, "Paused": False}
         with self.assertRaisesRegex(ServiceError, "stop_not_confirmed"):
             self.abort()
+
+    def test_policy_update_failure_after_stop_can_be_retried_without_socket(self):
+        self.fail = "update"
+        with self.assertRaisesRegex(ServiceError, "docker_failure"):
+            self.abort()
+        self.assertFalse(self.current["State"]["Running"])
+        self.assertFalse(self.current["State"]["Restarting"])
+        self.fail = None
+        self.abort()
+        self.assertEqual(self.commands[-1], ["inspect", self.identity])

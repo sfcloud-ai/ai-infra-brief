@@ -306,8 +306,9 @@ class DockerDriver:
             if path.exists() and json.loads(path.read_text()).get("release") == release:
                 raise ServiceError("candidate_activation_not_excluded")
         self.revoke_permit()
-        self.command(["update", "--restart=no", identity])
+        # 未激活候选先停止重启循环，避免 update 与容器退出时的 runtime 竞态。
         self.command(["stop", "--time", "30", identity], timeout=40)
+        self.command(["update", "--restart=no", identity])
         current = json.loads(self.command(["inspect", identity]).stdout)[0]
         if any(current["State"].get(name) is not False for name in ("Running", "Restarting", "Paused")):
             raise ServiceError("candidate_stop_not_confirmed")
