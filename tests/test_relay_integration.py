@@ -102,6 +102,10 @@ class RelayIntegrationTests(unittest.TestCase):
         for filename, fingerprint in expected.items():
             tree = StripDocumentation().visit(ast.parse((RELAY_ROOT / filename).read_text()))
             if filename == "relay.py":
+                # 包入口仅切换相对导入，独立旧入口仍使用原始 images 导入。
+                tree.body = [node.orelse[0] if isinstance(node, ast.If)
+                             and isinstance(node.test, ast.Name) and node.test.id == "__package__"
+                             else node for node in tree.body]
                 matches = [node for node in ast.walk(tree) if isinstance(node, ast.Tuple) and
                            all(isinstance(value, ast.Constant) for value in node.elts) and
                            [value.value for value in node.elts] == [None, "bot_message", "file_share"]]

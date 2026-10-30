@@ -2,7 +2,7 @@
 
 AI Infra 晨报将研究规则、编辑规则、历史去重、报告生成和投递状态分开管理。项目关注模型服务基础设施，以及制造业具身相关的训练技术；规则位于 `ai_brief/resources/prompts/`。
 
-晨报流水线提供本地 **mock/simulation** 模式：默认使用空 fixture，生成 JSON、Markdown 和 SVG，不联网、不调用真实模型、不读取发送凭据，也不会发布消息或创建调度。真实研究、语义去重和 Slack 上传／发布接口尚未接入；`live` 或未知 adapter 会报错，不会自动降级为 mock。
+晨报流水线使用本地 **mock/simulation** 模式，从 fixture 生成 JSON、Markdown 和 SVG，并将模拟投递回执保存在本地。默认输入为空 fixture；运行模式配置为 `live` 或未知 adapter 时会报错。
 
 仓库另含独立的 [Slack → 企业微信转发器](integrations/slack_wecom/README.md)。其服务命令会读取私有配置并联网，需单独配置和启动；运行晨报流水线不会启动它。
 
@@ -29,7 +29,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --no-deps /tmp/sfcloud-wheels/sfcloud_ai-0.1.0-py3-none-any.whl
 ```
 
-安装后可从其他目录运行 `/absolute/path/to/.venv/bin/ai-brief`。prompt、配置和 schema 随 wheel 打包；修改这些资源后需重新构建并安装。独立转发器不随该 wheel 安装。
+安装后可从其他目录运行 `/absolute/path/to/.venv/bin/ai-brief`。prompt、配置和 schema 随 wheel 打包；修改这些资源后需重新构建并安装。转发器及受控运行入口也随该 wheel 打包，受控命令为 `ai-brief-relay`。
 
 ## 配置
 
@@ -86,3 +86,11 @@ python3 -m venv .venv
 `ai_brief.relay_contract.prepare_relay_preview` 可将符合 schema 的晨报转换为离线事件模板，首行规范为 `AI Infra 晨报 · 日期`。`event_template` **不是 Slack 发布 API 参数**，`delivery_allowed` 始终为 `false`，调用它不会上传或发送消息。
 
 独立转发器接收固定 Slack 私信、固定发送者的晨报及直接附带的 PNG/JPEG 图片。流水线生成的 SVG 需要先转成 PNG/JPEG，再通过独立实现的 Slack 上传和发布步骤交给转发器。转发器的凭据配置、服务启动、手动入口和投递边界见 [模块用法](integrations/slack_wecom/README.md)。
+
+## 自动部署与回滚
+
+T4 的连接信息在 GitHub 仓库设置中配置，地址和密钥使用 `t4-production` Environment Secrets，端口使用 Environment Variable。仓库变量 `CD_ENABLED` 控制自动发布开关；环境仅允许 `main` 分支。
+
+主线 Python 和部署配置更新通过 Actions 发布转发器，采用单实例切换，升级和回滚沿用同一游标与投递账本。配置、首次交接和回滚操作见 [T4 部署](deploy/README.md)，状态的版本边界见 [状态管理](DEPLOYMENT.md)。
+
+日报任务每次运行从 GitHub 主线读取 [研究 Prompt](https://github.com/sfcloud-ai/ai-infra-brief/blob/main/ai_brief/resources/prompts/research.md) 和 [编辑 Prompt](https://github.com/sfcloud-ai/ai-infra-brief/blob/main/ai_brief/resources/prompts/editor.md)。T4 部署包只包含转发器；单独修改 Prompt 或文档不会触发 T4 部署。

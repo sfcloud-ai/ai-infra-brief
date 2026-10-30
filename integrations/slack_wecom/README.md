@@ -2,18 +2,18 @@
 
 把一个指定 Slack 私信中的新晨报转发到企业微信群机器人。支持正文和直接附带的 PNG/JPEG 图片，只使用 Python 标准库。
 
-这是用户提供的既有转发器源码，已作为 `sfcloud-ai/ai-infra-brief` 的独立模块整合。运行变更包括接纳符合过滤条件的 `file_share` 晨报、在解析本地 HTTP 请求之前设置超时，以及为图片下载增加覆盖阻塞读取的总超时。注释和文档字符串改为中文。原始导出记录见 `SOURCE_EXPORT.json`，本次变更和原AST指纹见 `INTEGRATION.json`。目录不含实际凭据、账号/服务器配置或运行数据；本次未操作原线上服务，也没有增加自动部署。
+独立源码入口使用 `relay.py`；随主项目 wheel 安装的 `ai-brief-relay` 提供保留游标的受控运行入口。自动发布与服务交接见 [T4 部署](../../deploy/README.md)。
 
 ## 接入晨报项目
 
 建议保持单一路径：晨报项目生成内容并发到 Slack，由本模块负责转发到企业微信。不要同时从晨报生成器直接向同一微信群发送，以免重复推送。
 
-1. 本目录已位于 `integrations/slack_wecom/`，保持两个 Python 运行文件相邻。当前使用同目录导入，不能只移动其中一个文件；它不随主流水线 wheel 安装，作为独立源码服务维护。
+1. 使用源码入口时保持本目录的 Python 文件相邻；使用受控发布时，转发器随主项目 wheel 安装。
 2. 晨报第一行使用 `AI Infra 晨报`，允许日期前缀和 Slack 粗体标记。正文与图片放在同一条消息内，图片应作为 Slack `files` 附件共享。
 3. 独立运行本模块，通过配置指定工作区、用户、私信和发送者，不让晨报生成器接触转发凭据。
-4. 初次整合先运行离线测试。实际发送测试需另行明确内容和目标，测试不会主动发消息。
+4. 运行下方离线测试后，配置并启动转发服务。
 
-模块随主项目使用 Apache-2.0，完整许可证见仓库根目录 LICENSE。`ai_brief.relay_contract.prepare_relay_preview` 提供纯数据适配：首行规范化、直接附件的 `file_share` 事件模板；不会上传或发送。真实采集、模型、Slack上传/发布仍待接入，主流水线 SVG 需先转为 PNG/JPEG。当前模板没有真实消息时间/身份，不是 Slack API 请求，不能据此宣称端到端已连通。
+模块随主项目使用 Apache-2.0，完整许可证见仓库根目录 LICENSE。`ai_brief.relay_contract.prepare_relay_preview` 生成离线事件模板，规范化首行并整理直接附件的 `file_share` 结构。模板供数据适配使用；发布到 Slack 时，使用上传和消息 API，并将 SVG 转为 PNG/JPEG。
 
 ## 自动转发范围
 
@@ -43,7 +43,7 @@ Slack 使用 **User Token**：文字需要 `im:history`，图片额外需要 `fi
 
 ## 在 Linux 上运行
 
-已测试的运行环境是 Linux + Python 3.12。不支持直接在 Windows 上运行服务：文件权限检查、Unix socket、`SO_PEERCRED` 和 `flock` 依赖 Linux/POSIX 能力。
+使用 Linux + Python 3.12。不支持直接在 Windows 上运行服务：文件权限检查、Unix socket、`SO_PEERCRED` 和 `flock` 依赖 Linux/POSIX 能力。
 
 ```sh
 RELAY_ROOT="$HOME/.local/share/morning-brief-relay"
@@ -65,7 +65,7 @@ python -B relay.py serve --root "$RELAY_ROOT"
 
 手动接口只通过本机 Unix socket 使用，并校验调用进程 UID。它与自动轮询分开，不推进自动游标。
 
-手动正文和指定消息入口比自动规则宽：同 UID 调用者可以发送明确指定正文或固定私信中的单条消息，不要求自动晨报标题/发送者。它仍需具体发送授权；不能声称所有手动内容都受自动晨报过滤。保持独立主入口，不能绕过 `main()` 的凭据/目的域校验，将内部 `WeCom` 类直接当任意 webhook 适配器。
+同 UID 调用者可以发送指定正文或固定私信中的单条消息，手动入口不要求自动晨报标题或发送者。使用下方命令调用，以执行凭据和目的域校验。
 
 向下面命令的标准输入提供 JSON：
 
@@ -75,7 +75,7 @@ python -B relay.py manual --root "$RELAY_ROOT" --kind slack-message
 python -B relay.py status --root "$RELAY_ROOT"
 ```
 
-对应输入示例（仅为格式，不要直接当作发送测试执行）：
+对应 JSON 输入格式：
 
 ```json
 {"request_id":"operator-example","text":"明确获准发送的正文"}
@@ -97,7 +97,7 @@ Slack 手动转发也只允许配置中的固定私信。选择线程中的单�
 - 下载只允许 `files.slack.com`，校验路径中的工作区和文件 ID，拒绝跳转和继承的代理。
 - 图片只在内存中处理，检查大小、格式结构和尺寸；这不是完整图片解码验证。服务主线程使用 POSIX 定时器限制单次下载总时长为 30 秒，结束后恢复原信号处理器；已有定时器时拒绝下载，避免覆盖其他任务的定时器。
 - 先发文字，再逐张发图。文字按 UTF-8 字节数拆分，文字与图片共用至少 3.2 秒的发送间隔。
-- 图片失败会记录 `partial`；超时或响应不确定记录 `unknown`，不盲目重试。程序不承诺跨网络调用的 exactly-once。
+- 图片失败记录 `partial`；超时或响应不确定记录 `unknown`，核对回执后再恢复发送。
 - SQLite 保存游标、请求标识、内容摘要和投递状态，不保存消息正文、图片或凭据。日志只记录固定事件码。
 
 ## 离线验证
@@ -110,6 +110,6 @@ python -B run_tests.py
 python -B run_tests.py --require-unix-socket
 ```
 
-测试使用合成消息、合成图片、临时状态和假传输层，不读取实际凭据。测试入口通过 Python 审计钩子禁止互联网套接字、DNS 和子进程，并检查外发尝试为零。它不是内核网络沙箱；可在已有 Python 3.12 镜像中配合 `--network none`。普通模式会明确跳过被沙箱阻止的唯一 Unix socket 测试；严格模式不允许此跳过。
+测试使用合成消息、合成图片、临时状态和假传输层。测试入口通过 Python 审计钩子禁止互联网套接字、DNS 和子进程，并检查外发尝试为零；容器运行可配合 `--network none`。普通模式跳过被沙箱阻止的 Unix socket 测试，严格模式要求完整执行。
 
-覆盖首次启动不回填、过滤、换行保留、字节拆分、去重、未知投递、崩溃恢复、权限校验、恶意图片地址拒绝和图片发送格式等。这些是构造的回归测试，不应称作真实生产问题复现或完整端到端实发验证。
+覆盖首次启动不回填、过滤、换行保留、字节拆分、去重、未知投递、崩溃恢复、权限校验、恶意图片地址拒绝和图片发送格式。
