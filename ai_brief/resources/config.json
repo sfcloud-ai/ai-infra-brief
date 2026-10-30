@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0",
+  "timezone": "Asia/Shanghai",
+  "lookback_hours": [24, 72, 168],
+  "minimum_items": 3,
+  "maximum_items": 6,
+  "history_days": 14
+}

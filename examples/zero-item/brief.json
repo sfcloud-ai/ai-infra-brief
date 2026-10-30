@@ -1,0 +1,23 @@
+{
+  "adapter_status": {
+    "delivery": "not_connected",
+    "editor": "mock_deterministic_only",
+    "research": "mock_fixture_only"
+  },
+  "as_of": "2026-10-30T08:00:00+08:00",
+  "date": "2026-10-30",
+  "history_files": [],
+  "items": [],
+  "mode": "mock",
+  "notes": [
+    "本地零项 fixture；未进行真实检索，不能据此判断今天没有新闻。",
+    "实际 adapter：本地 fixture 研究 + 确定性编辑；两阶段 prompt 未被模型执行。",
+    "已读取 0 份历史报告；URL/事件键去重已执行，语义去重尚未接入模型。",
+    "未达到目标数量时保留不足或零项，不使用过期条目补位。"
+  ],
+  "schema_version": "1.0",
+  "status": "zero_items",
+  "timezone": "Asia/Shanghai",
+  "warning": "模拟干跑：未联网、未调用模型、未核验来源，不可作为真实晨报发送。",
+  "window_hours": 168
+}
