@@ -12,7 +12,7 @@ from deploy.policy import Policy, PolicyError
 from deploy.release import ReleaseError, Releases, write_json
 from deploy.ssh_entry import parse_command
 from deploy.stage_helper import execute
-from deploy.supervisor import ServiceError
+from deploy.supervisor import DockerDriver, ServiceError
 from deploy import transport
 from integrations.slack_wecom.runtime import ControlledRelay
 from test_relay_integration import relay, relay_fixtures
@@ -139,6 +139,45 @@ class RestrictedHelperTests(unittest.TestCase):
             self.invoke("rollback 11 " + second + " " + first)
         self.assertEqual(self.driver.events, before)
         self.assertEqual(self.driver.running, second)
+
+    def test_crash_after_rollback_switch_still_blocks_original_event_replay(self):
+        first, second = "a" * 40, "b" * 40
+        self.deploy(10, first)
+        self.deploy(11, second)
+        with patch.object(Policy, "rolled_back", side_effect=RuntimeError("constructed_crash")):
+            with self.assertRaises(RuntimeError):
+                self.invoke("rollback 11 " + second + " " + first)
+        self.assertEqual(self.driver.running, first)
+        with self.assertRaises(PolicyError):
+            self.deploy(11, second)
+
+    def test_pending_recovery_precedes_new_event_staging_and_protects_both_versions(self):
+        first, second = "a" * 40, "b" * 40
+        self.deploy(10, first)
+        write_json(self.root / "switch-pending.json", {"before": first, "target": second})
+        self.driver.running = second
+        self.driver.refuse_drain = second
+        before = list(self.staged)
+        for sequence in (11, 12, 13):
+            with self.assertRaises(ServiceError):
+                self.deploy(sequence, "c" * 40)
+        self.assertEqual(self.staged, before)
+        self.assertEqual(Policy(self.root).value["sequence"], 10)
+        self.assertTrue({first, second} <= Policy(self.root).protected())
+
+    def test_drain_revokes_restart_activation_before_pause_ack(self):
+        driver = DockerDriver.__new__(DockerDriver)
+        driver.activation = self.root
+        driver.live = {"container": "synthetic-managed"}
+        write_json(self.root / "active.json", {"release": "a" * 40})
+
+        def status(release, operation):
+            self.assertEqual(json.loads((self.root / "active.json").read_text()), {"release": None})
+            return {"phase": "paused", "reconciled": True}
+
+        with patch.object(driver, "running_release", side_effect=["a" * 40, None]), \
+                patch.object(driver, "status", side_effect=status), patch.object(driver, "command"):
+            driver.quiesce("a" * 40)
 
     def test_failed_new_health_rolls_back_without_parallel_sender_or_state_rewind(self):
         first, second = "a" * 40, "b" * 40

@@ -24,7 +24,8 @@ class ReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.manager = Releases(self.root, "/usr/bin/python3")
+        # 这些用例验证发布协议；小型 tmpfs 的容量策略在独立用例中模拟检查。
+        self.manager = Releases(self.root, "/usr/bin/python3", reserve=0)
 
     def ready(self, commit):
         path = self.root / "releases" / commit

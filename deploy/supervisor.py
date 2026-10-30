@@ -264,6 +264,9 @@ class DockerDriver:
         if managed:
             if managed != release:
                 raise ServiceError("unexpected_active_instance")
+            # 在请求暂停前撤销自动激活，期间重启的容器只能以暂停模式启动。
+            write_json(self.activation / "active.json", {"release": None})
+            os.chmod(self.activation / "active.json", 0o444)
             result = self.status(release, "pause")
             if result.get("phase") != "paused" or result.get("reconciled") is not True:
                 raise ServiceError("unreconciled_delivery_blocks_stop")

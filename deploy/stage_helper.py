@@ -14,11 +14,11 @@ import uuid
 if __package__:
     from .policy import Policy
     from .ssh_entry import parse_command
-    from .supervisor import DockerDriver, Supervisor
+    from .supervisor import DockerDriver, ServiceError, Supervisor
 else:
     from policy import Policy
     from ssh_entry import parse_command
-    from supervisor import DockerDriver, Supervisor
+    from supervisor import DockerDriver, ServiceError, Supervisor
 
 CONFIG = Path("/etc/ai-brief-stage.json")
 CODE_ROOT = Path("/usr/local/lib/ai-brief-control")
@@ -84,6 +84,11 @@ def execute(command, config, control_root, stage_runner=stage, driver_factory=Do
     if command == ("status",):
         return {"sequence": policy.value["sequence"], "active": policy.value["active"],
                 "previous": policy.value["previous"]}
+    if (Path(control_root) / "switch-pending.json").exists():
+        if not config.get("live_enabled"):
+            raise ValueError("pending_switch_requires_recovery")
+        Supervisor(control_root, driver_factory(config, control_root), policy).rollback_interrupted()
+        raise ServiceError("interrupted_switch_recovered_retry_explicitly")
     operation, sequence, first, second = command
     sequence = int(sequence)
     if operation == "deploy":
@@ -96,7 +101,7 @@ def execute(command, config, control_root, stage_runner=stage, driver_factory=Do
         return {"status": "activated", "commit": first, "sequence": sequence}
     if not config.get("live_enabled"):
         raise ValueError("production_disabled")
-    policy.check_rollback(sequence, first, second)
+    policy.begin_rollback(sequence, first, second)
     supervisor = Supervisor(control_root, driver_factory(config, control_root), policy)
     supervisor.switch(second)
     policy.rolled_back(second)

@@ -59,5 +59,16 @@ class Policy:
         self.value["rollback_block"] = True
         self.save("explicit_rollback", commit=target, sequence=self.value["sequence"])
 
+    def begin_rollback(self, sequence, expected, target):
+        self.check_rollback(sequence, expected, target)
+        # 先持久阻断原部署事件，避免切换完成后、写回滚结果前崩溃而重新上线。
+        self.value["rollback_block"] = True
+        self.save("rollback_requested", commit=target, sequence=sequence)
+
     def protected(self):
-        return {item for item in (self.value["active"], self.value["previous"]) if item}
+        protected = {item for item in (self.value["active"], self.value["previous"]) if item}
+        pending = self.path.parent / "switch-pending.json"
+        if pending.exists():
+            record = json.loads(pending.read_text())
+            protected.update((record["before"], record["target"]))
+        return protected
