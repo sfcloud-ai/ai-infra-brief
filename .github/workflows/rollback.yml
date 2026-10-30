@@ -1,0 +1,39 @@
+name: t4-controlled-rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 已成功运行过且仍保留的目标版本 SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t4-production-release
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    if: >-
+      github.repository == 'sfcloud-ai/ai-infra-brief' &&
+      github.ref == 'refs/heads/main' && vars.CD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: t4-production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Roll back using the same restricted entry and current-version comparison
+        env:
+          ROLLBACK_TARGET: ${{ inputs.release }}
+          T4_SSH_HOST: ${{ secrets.T4_SSH_HOST }}
+          T4_SSH_USER: ${{ secrets.T4_SSH_USER }}
+          T4_SSH_PRIVATE_KEY: ${{ secrets.T4_SSH_PRIVATE_KEY }}
+          T4_SSH_KNOWN_HOSTS: ${{ secrets.T4_SSH_KNOWN_HOSTS }}
+          T4_SSH_PORT: ${{ vars.T4_SSH_PORT }}
+        run: python3 deploy/transport.py --rollback "$ROLLBACK_TARGET"

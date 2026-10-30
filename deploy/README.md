@@ -1,58 +1,62 @@
 # T4 部署候选与首次交接
 
-这套代码目前用于**独立原型暂存和离线验证**。最终上线目标是新版本接替现有转发器，只有一个实例发送消息；不是长期并行运行两套转发器。现阶段没有停旧实例、复制真实凭据、读取真实账本内容或启用 CD。
+最终目标是 main 更新后自动替换旧转发器，始终只有一个实例发送。当前代码是待审查的 CD 候选；T4 已准备独立暂存目录并复用现有 Python 3.12 镜像。尚未安装生产控制入口、创建持久凭据、设置 GitHub Secrets、停止旧实例或启用自动部署。
 
-## 已确认的环境与实现范围
+## 发布路径
 
-T4 是 Ubuntu 20.04 / x86_64 / glibc 2.31，宿主机 Python 3.8；存在可复用的 Python 3.12 镜像。验证使用现有镜像，不需要安装宿主机 Python，不给未来部署账户开放 Docker 组权限。现有转发器继续运行。
+cd.yml 仅处理本仓库 push main，仓库 Variable `CD_ENABLED` 必须为 true。每次 main 推送均检查，以免文档提交紧随 Python 提交导致前一部署被当前版本检查跳过。只读测试通过后进入 t4-production 环境，精确构建事件 SHA；传输前再次确认该 SHA 仍是 main 当前版本。外部 PR 只有无凭据测试，不使用 self-hosted runner、pull_request_target 或高权限 workflow_run。
 
-`bundle.py` 只允许应用 wheel 和锁定哈希的运行依赖，包内没有真实配置、地址、密钥或账本。`release.py` 将包安装到独立的 `releases/<commit>/venv`，检查后用原子 symlink 替换 `current`，保留 `previous`；切换后检查失败时恢复旧指针。崩溃留下的 pending 记录在下次操作前恢复。回滚只改代码指针，不回退状态。
+bundle.py 打包锁定哈希的 wheel；gzip 时间及名称、tar 元数据固定。构建设置 SOURCE_DATE_EPOCH。release.py 在非 root、断网容器中验证完整上传，安装至独立 releases/<SHA>/venv，检查晨报入口和已安装转发器能力，然后原子替换暂存指针。wheel 包含转发器、图片处理、游标恢复和受控 runtime。旧版本缺失 ready 标记时，只有不被 current/previous/待切换记录或线上版本引用的目录允许重建。
 
-目前健康检查只验证 mock 晨报包能运行，**不能代表真实 Slack→企微链路健康**。发布器不启动或停止系统服务。`stage_e2e.py` 实际执行离线 wheel 安装、切换、幂等和回滚，但使用合成版本号；游标测试使用合成消息，不是真实消息交接的证明。
+根权限控制层不随应用自动更新：管理员一次性安装已审查的 stage_helper.py、ssh_entry.py、release.py、policy.py、supervisor.py 与 relay/runtime.py、relay/resume.py。固定配置和代码由 root 持有；main 发布只替换非 root 应用 wheel。修改控制层须重新审查并由管理员安装。
 
-`.github/workflows/cd.yml` 是暂存候选：仅 `push main`，包括 Python、资源、依赖及部署逻辑变更；精确 checkout 事件 SHA，不接收 PR artifact 或分支输入。只读测试通过后才进入 `t4-prototype` 环境。仓库 Variable `PROTOTYPE_CD_ENABLED` 必须显式为 `true` 才启用，默认未启用；没有手动输入入口。该候选尚未提交到远端，不能当作已经配置的最终生产 CD。
+受限 SSH 入口仅接受以下命令，拒绝任意 shell 文本：
 
-## 预备目录与运行隔离
+```text
+status
+deploy <正整数工作流序号> <40位提交SHA> <64位包摘要>
+rollback <当前工作流序号> <当前版本> <曾成功激活的目标版本>
+```
 
-T4 用户目录中使用专门的 `ai-infra-brief-prototype-staging` 暂存目录；实际私有位置仅保留在本机操作记录，公开代码不写入连接信息。目录包含独立源码、wheel 缓存和原型 release，均不挂载现有 relay 根目录。
+发布和回滚都经同一个入口、root 部署锁及 supervisor。序号高水位拒绝延迟旧事件；相同事件重试必须包身份一致；显式回滚检查当前版本和序号，保留高水位并阻止原事件重放。rollback.yml 仅在 main 手动运行，输入只有目标版本，连接参数一律来自仓库设置。两工作流共用并发组。已经清理或不完整的目标在停止服务前拒绝。
 
-验证容器采用现有镜像固定摘要、非 root 用户、只读根文件系统、`--network none`、禁用 Linux capabilities、`no-new-privileges`、CPU/内存/PID 限额、不使用 GPU。源码和依赖只读挂载，只有新建原型目录可写。没有真实 Slack/企微配置或状态进入容器。
+## 单实例切换与回滚
 
-## 首次接替旧转发器的必要步骤
+原转发器直接启动会将游标移至最新消息。候选受控入口改为沿用原 cursor，并绑定原 team/user/channel/sender；升级和回滚都使用同一运行根、service.lock、SQLite 账本和私有 socket，不复制一份账本另起发送者，也不回退数据库。
 
-直接重启旧入口不满足无漏发要求：原转发器 `baseline()` 总是取最新消息作为游标，主动跳过停机窗口。候选 `relay_resume.py` 提供显式交接模式，沿用已有 cursor，并将其绑定到原 team/user/channel/sender；默认旧行为未修改，必须由受控入口显式选用。
+1. 首次切换要求 root 配置显式设置 bootstrap_approved。核对旧容器镜像、UID/GID、状态挂载及源码路径，保存旧源码供受控恢复。旧源码标识是内容摘要，不冒充 Git 提交。
+2. 对已受控实例，先通过私有 socket 暂停，等待当前调用完成，确认账本无 sending/unknown，再关闭自动重启并停止。原旧实例没有 drain：冻结它，使用独立只读容器检查账本，再终止冻结进程；检查失败则解冻原实例。此首次操作仍需实际环境预检和当场授权。
+3. 确认旧发送者停止后持同一锁，检查 SQLite 完整性、游标及身份。在首次绑定前用 SQLite backup 保存一致性备份；备份先写 partial，再原子落盘，最多保留三个。普通回滚绝不恢复旧账本。
+4. 新实例先暂停启动，只读验证 Slack 身份和历史可读性。激活后至少完成一次正常轮询、账本无未知回执才确认健康；不以 mock 晨报检查代替生产健康。激活记录由 root 持有，支持已确认版本的容器重启恢复。
+5. 失败时先确认新发送者停止，再用相同账本和受控 resume 入口恢复前版。无法确认停止或存在未知发送结果时保留 pending 并停止自动切换，避免两个发送者或猜测重发。
 
-正式切换前须完成以下门槛，当前尚未执行：
+sending/unknown 必须人工核对真实回执。消息已被删除、历史不可读或超出可完整读取的积压范围时，自动流程不重置游标。网络侧发送结果未知时不能承诺同时零漏发、零重复。
 
-1. 记录旧实例精确镜像、命令、挂载和重启策略；只读核对旧源码版本及数据库 schema。定义唯一的运行根、锁文件和私有 socket，禁止新旧实例各自使用一份复制账本并同时运行。
-2. 在独立目录准备新代码并运行所有离线验证。冻结自动切换；由管理员确认维护窗口和首轮回滚方案后才允许停旧。
-3. 停止旧实例并禁用其自动复活路径，确认进程完全退出并取得同一个 `service.lock`。旧版本没有优雅 drain 接口；首次停机可能中断发送，因此必须检查账本中的 `sending`/`unknown`，并查实际回执。存在未核对结果时停止交接，不能自动补发或标成成功。
-4. 停旧并持锁后，使用 SQLite backup API 保存一致性备份，检查 integrity 和兼容 schema。保留原运行根和账本，不把数据写入 release。确认身份一致后写 `handoff_binding_v1`。升级及回滚都保持 cursor、请求去重键、分段与图片状态；备份仅用于灾难恢复，普通代码回滚不能恢复旧账本。
-5. 新实例先以暂停投递模式启动并只读核验 Slack 身份/权限、数据库与 socket 状态。确认只有一个实例持锁后再解除暂停。当前候选尚未实现生产暂停/激活 supervisor，这是正式切换前的阻断，不能把 mock 健康检查当作替代。
-6. 新实例沿用旧游标取切换期间的消息，使用原请求键去重。API 查询失败或积压超过接口可完整读取的范围时暂停并告警，不重置游标。消息被删除、接口不可读或发送结果未知时无法同时保证不漏发和不重发，必须人工对账。
-7. 首轮上线验证失败：先暂停并完全停止新实例，再按原镜像/命令恢复旧代码，仍使用当前账本和受控 resume 入口；禁止直接用会重置 cursor 的旧启动方式。所有自动恢复路径都必须先证明单实例锁与暂停机制有效。
+## 容量与隔离
 
-这些步骤的真实服务 supervisor、首次状态核对和暂停/激活演练尚未完成，因此最终“main 合入后自动替换旧 relay”的 CD 不应启用。
+默认最多保留 5 个应用 release、约 1 GiB release 文件，预留 512 MiB 可用空间；清理保护线上、上一版、暂存指针和候选版本。按安装展开量预检容量，属于应用层限制，不是文件系统配额。旧源码快照和共享状态另行管理。控制检查容器超时会清理自身的唯一名称。
 
-## 需要当场确认的持续访问步骤
+验证使用固定镜像摘要、非 root、只读根文件系统、禁用 capabilities、no-new-privileges、CPU/内存/PID 限额、无网络、无 GPU。实际 runtime 只开放出站 bridge 网络，私有配置只读、state/run 可写。部署账户不加入 Docker 组，不获得通用 sudo；其 UID 与转发器运行 UID 分离，不能自行写受保护发布目录或读取运行凭据。
 
-建议复用现有 Docker 镜像，通过**固定、管理员所有的受限 helper**操作预先指定的原型目录。`ssh_entry.py` 与 `stage_helper.py` 已给出候选实现，仅能运行断网的暂存容器；它们没有控制现有 relay 的权限或命令。未来专用 SSH 账户不加入 Docker 组、不获得通用 sudo 或交互 shell；公钥强制命令只接受 `deploy <40位SHA> <64位摘要>`，禁用 PTY、端口/代理转发。helper 的路径、参数和挂载不可来自任意 SSH 命令文本。
+## 待授权的安装与配置
 
-需要当场确认后才可进行的具体安装：创建专用账户及部署 key；将 `ssh_entry.py`、`stage_helper.py`、`release.py` 安装为 root 所有的固定入口；建立 root 所有的 `/etc/ai-brief-stage.json`，只含预先批准的原型路径、非零 UID/GID 与既有镜像摘要；创建该账户所有、0700 的 `/opt/ai-infra-brief-prototype`；添加只允许执行该固定 helper 的 sudoers 规则与 forced-command 公钥。配置校验拒绝其他路径、root 容器用户、浮动镜像标签。以上安装、账户、sudo 规则和授权 key 均尚未执行。生产替换 supervisor 必须另外完成安全审查和单实例交接验证，不能复用暂存成功信号来自动停旧。
+以下步骤尚未执行，须当场确认后由管理员实施：创建专用 SSH 账户/部署 key；安装 root 控制层；配置强制命令公钥、禁止 PTY/代理/端口转发和任意 shell、只允许固定 helper 的 sudo 规则；建立固定 /opt/ai-infra-brief-prototype 和 root 私有 /var/lib/ai-brief-control。将已经核实的实际路径与镜像摘要写入 root 所有的 /etc/ai-brief-stage.json。初始 live_enabled 和 bootstrap_approved 均为 false，首次切换验证通过并获授权后再启用。控制层安装、持续权限配置和首轮切换分别验收。
 
-GitHub 需管理员配置：
-
-| 位置 | 名称 | 用途 |
+| GitHub 设置位置 | 名称 | 用途 |
 |---|---|---|
-| 仓库 Variable | `PROTOTYPE_CD_ENABLED` | 暂存开关，准备和验证完成后才设为 `true` |
-| `t4-prototype` Environment Secret | `T4_SSH_HOST` | 私有主机地址 |
-| 同上 | `T4_SSH_USER` | 专用受限账户 |
-| 同上 | `T4_SSH_PRIVATE_KEY` | 专用部署私钥，用户直接在 GitHub Settings 填写 |
-| 同上 | `T4_SSH_KNOWN_HOSTS` | 通过可信通道核验的主机公钥记录 |
-| Environment Variable | `T4_SSH_PORT` | SSH 端口，非敏感配置 |
+| 仓库 Variable | CD_ENABLED | 默认关闭，完成验证后才设 true |
+| t4-production Environment Secret | T4_SSH_HOST | 私有地址 |
+| 同上 | T4_SSH_USER | 专用受限账户 |
+| 同上 | T4_SSH_PRIVATE_KEY | 部署私钥，由用户直接填入 GitHub Settings |
+| 同上 | T4_SSH_KNOWN_HOSTS | 经可信通道核验的主机公钥记录 |
+| Environment Variable | T4_SSH_PORT | SSH 端口 |
 
-环境分支规则必须明确只允许 **Branch `main`**，不要用“仅受保护分支”而不实际保护 main。限制可信 write 人员并保护 main，是这里的信任边界；无需每次人工审批。外部 PR 只有无凭据测试；不用 self-hosted runner、`pull_request_target` 或 `workflow_run` 提权。组织 Owner 仍可修改组织权限，不能宣称仓库设置能排除 Owner。
+环境分支规则明确只允许 Branch main，保护 main 并限制可信 write 人员。此方案按用户要求不逐次人工审批；拥有 main 写入权限者和组织管理员属于信任边界，不能宣称排除 Owner 或所有其他可信写入者。连接信息不出现在仓库、日志或手动工作流输入中。SSH 原始错误不回显；私钥仅保存于临时权限受限文件，步骤结束清理。不在聊天中提交密钥，不以未经核验的 ssh-keyscan 输出建立信任。
 
-Secrets 存在环境中且只映射给最后的 SSH 传输步骤。客户端校验 host/user/port，固定主机信任，禁用 agent，不回显 SSH 原始错误；临时私钥文件在结束后删除。不要在聊天中粘贴密钥，不以 `ssh-keyscan` 的未验证结果直接建立信任。
+## 验证证据的边界
 
-资料依据：[GitHub 部署环境与分支限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)、[环境设置](https://docs.github.com/actions/deployment/targeting-different-environments/using-environments-for-deployment)、[并发部署](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments)、[pip 哈希与二进制安装](https://pip.pypa.io/en/stable/topics/secure-installs/)。
+断网测试包括干净源码分别构建相同 wheel、重复打包、真实 venv 安装和强制中断重试。受限命令解析与 helper 分派、故障回滚和序号防重放使用合成服务驱动；实际子进程和 Unix socket 测试验证暂停/激活/重启、共享锁、游标延续，但外部消息提供方仍是合成适配器。不能把它们描述为真实生产消息交接或完整 SSH 认证链验证。
+
+正式启用仍需完成真实 forced-command/sudo/环境分支限制验收、旧源码及账本兼容性核对、维护窗口内的单实例切换和回滚验证。PR #1 尚不合入，当前线上转发器持续运行。
+
+资料：[GitHub 环境与分支限制](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)、[pip 安全安装](https://pip.pypa.io/en/stable/topics/secure-installs/)。

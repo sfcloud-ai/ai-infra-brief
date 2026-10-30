@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 
 MAX_BUNDLE = 64 * 1024 * 1024
 MAX_CONTENT = 128 * 1024 * 1024
@@ -82,8 +83,11 @@ def unpack_bundle(archive_path, destination, commit, checksum):
 
 
 class Releases:
-    def __init__(self, root, runtime):
+    def __init__(self, root, runtime, protected=(), keep=5, reserve=512 * 1024 * 1024, max_bytes=1024 * 1024 * 1024):
         self.root, self.runtime = Path(root).absolute(), str(Path(runtime).absolute())
+        self.protected, self.keep, self.reserve, self.max_bytes = set(protected), keep, reserve, max_bytes
+        if keep < 3 or reserve < 0 or max_bytes < 1 or any(not SHA.fullmatch(value) for value in self.protected):
+            raise ReleaseError("invalid_retention_policy")
         info = self.root.lstat()
         if (self.root.resolve() != self.root or not stat.S_ISDIR(info.st_mode)
                 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022):
@@ -93,6 +97,32 @@ class Releases:
             path.mkdir(mode=0o700, exist_ok=True)
             if path.is_symlink() or not path.is_dir() or path.stat().st_uid != os.getuid():
                 raise ReleaseError("unsafe_subdirectory")
+
+    def retain(self, candidate=None, incoming_bytes=0):
+        protected = self.protected | {self.pointer("current"), self.pointer("previous"), candidate}
+        if (self.root / "pending.json").exists():
+            raise ReleaseError("activation_recovery_required")
+        entries = []
+        for path in (self.root / "releases").iterdir():
+            if not SHA.fullmatch(path.name) or path.is_symlink() or not path.is_dir():
+                raise ReleaseError("unexpected_release_path")
+            size = sum(item.lstat().st_size for item in path.rglob("*") if not item.is_symlink() and item.is_file())
+            entries.append((path, size))
+        slots = int(candidate is not None and not (self.root / "releases" / candidate).exists())
+        for path, size in sorted(entries, key=lambda item: item[0].stat().st_mtime):
+            total = sum(amount for _, amount in entries)
+            if (len(entries) + slots <= self.keep and total + incoming_bytes <= self.max_bytes
+                    and shutil.disk_usage(self.root).free >= self.reserve + incoming_bytes):
+                break
+            if path.name in protected:
+                continue
+            if path.stat().st_uid != os.getuid():
+                raise ReleaseError("foreign_release_owner")
+            shutil.rmtree(path)
+            entries.remove((path, size))
+        if (len(entries) + slots > self.keep or sum(size for _, size in entries) + incoming_bytes > self.max_bytes
+                or shutil.disk_usage(self.root).free < self.reserve + incoming_bytes):
+            raise ReleaseError("retention_or_free_space_limit")
 
     def pointer(self, name):
         path = self.root / name
@@ -155,6 +185,10 @@ class Releases:
                                          "--state-dir", directory + "/mock-state", "run"]))
             if result["manifest"]["delivery"]["real_status"] != "not_sent":
                 raise ReleaseError("unexpected_delivery")
+        capabilities = json.loads(self.run([str(release / "venv/bin/python"), "-I", "-m",
+                                            "ai_brief_relay.runtime", "capabilities"]))
+        if capabilities != {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0}:
+            raise ReleaseError("relay_runtime_missing")
 
     def recover(self):
         path = self.root / "pending.json"
@@ -192,22 +226,42 @@ class Releases:
         release = self.root / "releases" / commit
         if not SHA.fullmatch(commit):
             raise ReleaseError("invalid_commit")
-        if release.exists() or release.is_symlink():
-            if release.is_symlink() or not release.is_dir():
-                raise ReleaseError("unsafe_release")
-            ready = release / "ready.json"
-            if not ready.exists() or json.loads(ready.read_text())["bundle_sha256"] != checksum:
-                raise ReleaseError("existing_release_conflict")
-        else:
-            try:
-                unpack_bundle(archive, release, commit, checksum)
-                self.install(release)
-                self.health(commit)
-                write_json(release / "ready.json", {"commit": commit, "bundle_sha256": checksum})
-            except BaseException:
-                if release.is_dir() and not release.is_symlink():
+        # 生产入口持 deployment.lock；先完整验证新包，再处理被强制中断的旧目录。
+        with tempfile.TemporaryDirectory(prefix="validate-", dir=self.root / "incoming") as directory:
+            validated = Path(directory) / "release"
+            unpack_bundle(archive, validated, commit, checksum)
+            expanded = 0
+            for wheel in (validated / "wheels").glob("*.whl"):
+                with zipfile.ZipFile(wheel) as package:
+                    expanded += sum(item.file_size for item in package.infolist())
+            if expanded > MAX_CONTENT:
+                raise ReleaseError("wheel_expansion_limit")
+            reusable = False
+            if release.exists() or release.is_symlink():
+                if release.is_symlink() or not release.is_dir() or release.stat().st_uid != os.getuid():
+                    raise ReleaseError("unsafe_release")
+                ready = release / "ready.json"
+                if ready.exists() or ready.is_symlink():
+                    if ready.is_symlink() or not ready.is_file() or json.loads(ready.read_text())["bundle_sha256"] != checksum:
+                        raise ReleaseError("existing_release_conflict")
+                    reusable = True
+                else:
+                    if ((self.root / "pending.json").exists()
+                            or commit in self.protected | {self.pointer("current"), self.pointer("previous")}):
+                        raise ReleaseError("referenced_incomplete_release")
+                    # 仅清除当前 commit 对应、未激活、无 ready 的受控目录；不触碰账本。
                     shutil.rmtree(release)
-                raise
+            if not reusable:
+                self.retain(commit, expanded + 32 * 1024 * 1024)
+                os.replace(validated, release)
+                try:
+                    self.install(release)
+                    self.health(commit)
+                    write_json(release / "ready.json", {"commit": commit, "bundle_sha256": checksum})
+                except BaseException:
+                    if release.is_dir() and not release.is_symlink():
+                        shutil.rmtree(release)
+                    raise
         return self.activate(commit)
 
 
@@ -216,11 +270,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", required=True)
     parser.add_argument("--python", required=True)
+    parser.add_argument("--protect", action="append", default=[])
+    parser.add_argument("--keep", type=int, default=5)
+    parser.add_argument("--reserve-bytes", type=int, default=512 * 1024 * 1024)
+    parser.add_argument("--max-bytes", type=int, default=1024 * 1024 * 1024)
     parser.add_argument("operation", choices=("deploy", "rollback"))
     parser.add_argument("commit")
     parser.add_argument("checksum", nargs="?")
     args = parser.parse_args()
-    manager = Releases(args.root, args.python)
+    manager = Releases(args.root, args.python, args.protect, args.keep, args.reserve_bytes, args.max_bytes)
     fd = os.open(manager.root / "deployment.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

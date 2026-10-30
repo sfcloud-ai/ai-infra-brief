@@ -7,9 +7,11 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from deploy.release import ReleaseError, Releases, unpack_bundle, write_json
+from deploy.bundle import make_bundle
 from deploy.relay_resume import assert_reconciled, binding, resume_class
 from deploy.transport import ssh_arguments
 from deploy.ssh_entry import parse_command
@@ -28,6 +30,75 @@ class ReleaseTests(unittest.TestCase):
         path = self.root / "releases" / commit
         path.mkdir()
         write_json(path / "ready.json", {"commit": commit, "bundle_sha256": "d" * 64})
+
+    def bundle(self, filename="one.tar.gz"):
+        wheels = self.root / "bundle-wheels"
+        if not wheels.exists():
+            wheels.mkdir()
+            with zipfile.ZipFile(wheels / "sfcloud_ai-0.1.0-py3-none-any.whl", "w") as archive:
+                archive.writestr("ai_brief/__init__.py", "")
+            (self.root / "runtime.lock").write_text("")
+        path = self.root / filename
+        checksum = make_bundle("a" * 40, wheels, self.root / "runtime.lock", path)
+        return path, checksum
+
+    def test_repacked_identical_inputs_are_idempotent_across_names_and_times(self):
+        with patch("time.time", return_value=1700000000):
+            first, checksum = self.bundle("first.tar.gz")
+        with patch.object(self.manager, "install") as install, patch.object(self.manager, "health"):
+            self.assertEqual(self.manager.deploy(first, "a" * 40, checksum), "activated")
+            with patch("time.time", return_value=1800000000):
+                second, repeated = self.bundle("different-name.tar.gz")
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(checksum, repeated)
+            self.assertEqual(self.manager.deploy(second, "a" * 40, repeated), "already_current")
+            self.assertEqual(install.call_count, 1)
+
+    def test_incomplete_unreferenced_release_is_rebuilt_after_validation(self):
+        path, checksum = self.bundle()
+        incomplete = self.root / "releases" / ("a" * 40)
+        incomplete.mkdir()
+        (incomplete / "half-installed").write_text("constructed_interruption")
+        with patch.object(self.manager, "install") as install, patch.object(self.manager, "health"):
+            self.assertEqual(self.manager.deploy(path, "a" * 40, checksum), "activated")
+        self.assertEqual(install.call_count, 1)
+        self.assertFalse((incomplete / "half-installed").exists())
+        self.assertTrue((incomplete / "ready.json").is_file())
+
+    def test_bad_upload_does_not_remove_incomplete_release(self):
+        path, checksum = self.bundle()
+        incomplete = self.root / "releases" / ("a" * 40)
+        incomplete.mkdir()
+        marker = incomplete / "preserve"
+        marker.write_text("existing_partial")
+        path.write_bytes(b"corrupted")
+        with self.assertRaises(ReleaseError):
+            self.manager.deploy(path, "a" * 40, checksum)
+        self.assertTrue(marker.exists())
+
+    def test_incomplete_referenced_release_is_never_cleaned(self):
+        path, checksum = self.bundle()
+        incomplete = self.root / "releases" / ("a" * 40)
+        incomplete.mkdir()
+        marker = incomplete / "preserve"
+        marker.write_text("referenced")
+        for name in ("current", "previous"):
+            self.manager.point(name, "a" * 40)
+            with self.assertRaisesRegex(ReleaseError, "referenced_incomplete"):
+                self.manager.deploy(path, "a" * 40, checksum)
+            self.assertTrue(marker.exists())
+            (self.root / name).unlink()
+        write_json(self.root / "pending.json", {"target": "a" * 40, "before": None, "previous": None})
+        with self.assertRaisesRegex(ReleaseError, "referenced_incomplete"):
+            self.manager.deploy(path, "a" * 40, checksum)
+        self.assertTrue(marker.exists())
+
+    def test_ready_release_with_different_payload_is_preserved(self):
+        path, checksum = self.bundle()
+        self.ready("a" * 40)
+        with self.assertRaisesRegex(ReleaseError, "existing_release_conflict"):
+            self.manager.deploy(path, "a" * 40, checksum)
+        self.assertEqual(json.loads((self.root / "releases" / ("a" * 40) / "ready.json").read_text())["bundle_sha256"], "d" * 64)
 
     def test_atomic_switch_and_explicit_rollback_keep_state(self):
         self.ready("a" * 40)
@@ -99,8 +170,9 @@ class ReleaseTests(unittest.TestCase):
                 ssh_arguments(host, "deploy", "22", "/key", "/known", "a" * 40, "b" * 64)
 
     def test_forced_command_and_helper_cannot_select_host_resources(self):
-        self.assertEqual(parse_command("deploy " + "a" * 40 + " " + "b" * 64), ("a" * 40, "b" * 64))
-        for command in ("sh", "deploy " + "a" * 40 + " " + "b" * 64 + "; id", "rollback " + "a" * 40):
+        self.assertEqual(parse_command("deploy 1 " + "a" * 40 + " " + "b" * 64), ("deploy", "1", "a" * 40, "b" * 64))
+        self.assertEqual(parse_command("rollback 1 " + "a" * 40 + " " + "b" * 40), ("rollback", "1", "a" * 40, "b" * 40))
+        for command in ("sh", "deploy 1 " + "a" * 40 + " " + "b" * 64 + "; id", "rollback " + "a" * 40):
             with self.assertRaises(ValueError):
                 parse_command(command)
         config = {"root": "/opt/ai-infra-brief-prototype", "uid": 1000, "gid": 1000, "image": "sha256:" + "c" * 64}

@@ -3,6 +3,7 @@
 from email.parser import Parser
 from importlib.metadata import distribution
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -70,11 +71,25 @@ class PackagingTests(unittest.TestCase):
         cls.home = cls.base / "home"
         cls.home.mkdir()
         # 不继承用户配置、令牌或 PYTHONPATH。
-        cls.environment = {"HOME": str(cls.home), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
+        cls.environment = {"HOME": str(cls.home), "PATH": "/usr/bin:/bin", "PYTHONDONTWRITEBYTECODE": "1",
+                           "PYTHONNOUSERSITE": "1", "SOURCE_DATE_EPOCH": "1700000000"}
         cls.checked([sys.executable, "-I", "-B", "-c",
                      "from setuptools.build_meta import build_wheel; "
                      f"build_wheel({str(cls.dist)!r})"], cwd=source)
         cls.wheel = next(cls.dist.glob("*.whl"))
+        repeated_source = cls.base / "other-clean-source"
+        shutil.copytree(SOURCE_ROOT, repeated_source, ignore=shutil.ignore_patterns(
+            "var", "__pycache__", "*.pyc", ".git", ".venv", "build", "dist", "*.egg-info", ".env", ".env.*"
+        ))
+        for path in repeated_source.rglob("*"):
+            if path.is_file():
+                os.utime(path, (1800000000, 1800000000))
+        repeated_dist = cls.base / "repeated-dist"
+        repeated_dist.mkdir()
+        cls.checked([sys.executable, "-I", "-B", "-c",
+                     "from setuptools.build_meta import build_wheel; "
+                     f"build_wheel({str(repeated_dist)!r})"], cwd=repeated_source)
+        cls.repeated_wheel = next(repeated_dist.glob("*.whl"))
         cls.venv = cls.base / "venv"
         # 嵌套 venv 不能继承 system-site-packages，否则会回到基础 Python，
         # 悄悄遗漏只安装在 CI 父 venv 中的依赖。
@@ -88,6 +103,7 @@ class PackagingTests(unittest.TestCase):
         cls.checked([str(cls.python), "-I", "-B", "-m", "pip", "--isolated",
                      "--disable-pip-version-check", "install", "--no-index", "--no-deps", str(cls.wheel)], cwd=cls.base)
         shutil.rmtree(source)  # 删除构建源码，检测运行时是否偷偷回退到该目录。
+        shutil.rmtree(repeated_source)
         cls.outside = cls.base / "unrelated-cwd"
         cls.outside.mkdir()
 
@@ -113,6 +129,16 @@ class PackagingTests(unittest.TestCase):
             license_text = archive.read(next(name for name in names if name.endswith("/licenses/LICENSE"))).decode()
             self.assertIn("Version 2.0, January 2004", license_text)
             self.assertIn("END OF TERMS AND CONDITIONS", license_text)
+
+    def test_clean_source_rebuild_with_different_mtimes_is_identical(self):
+        self.assertEqual(self.wheel.read_bytes(), self.repeated_wheel.read_bytes())
+
+    def test_installed_relay_entry_includes_resume_and_pause_control_without_source(self):
+        with ZipFile(self.wheel) as archive:
+            self.assertTrue({"ai_brief_relay/relay.py", "ai_brief_relay/images.py",
+                             "ai_brief_relay/resume.py", "ai_brief_relay/runtime.py"} <= set(archive.namelist()))
+        output = self.checked([str(self.venv / "bin/ai-brief-relay"), "capabilities"], self.outside)
+        self.assertEqual(json.loads(output), {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0})
 
     def test_runtime_dependencies_are_isolated_from_base_python(self):
         output = self.checked([str(self.python), "-I", "-B", "-c",

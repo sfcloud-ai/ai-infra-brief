@@ -1,8 +1,12 @@
 """在隔离目录实际安装 wheel，验证发布、幂等和回滚；不接触 relay。"""
 
 import argparse
+import os
 from pathlib import Path
 import sys
+import signal
+import subprocess
+import time
 
 from bundle import make_bundle
 from release import Releases
@@ -22,10 +26,42 @@ def main():
         checksum = make_bundle(version, args.wheels, Path(__file__).with_name("runtime.lock"), bundle)
         assert manager.deploy(bundle, version, checksum) == "activated"
         assert manager.deploy(bundle, version, checksum) == "already_current"
+        repacked = root / ("repacked-" + version + ".tar.gz")
+        assert make_bundle(version, args.wheels, Path(__file__).with_name("runtime.lock"), repacked) == checksum
+        assert manager.deploy(repacked, version, checksum) == "already_current"
     assert manager.pointer("previous") == versions[0]
     manager.activate(versions[0])
     assert manager.pointer("current") == versions[0]
     assert manager.pointer("previous") == versions[1]
+    interrupted = "3" * 40
+    bundle = root / "interruption.tar.gz"
+    checksum = make_bundle(interrupted, args.wheels, Path(__file__).with_name("runtime.lock"), bundle)
+    release = root / "releases" / interrupted
+    # 用正常 CLI 和真实解释器开始安装，再对本次独立进程组注入 SIGKILL。
+    # 这是故障注入演练，不代表在生产上复现过中断。
+    with bundle.open("rb") as stream:
+        child = subprocess.Popen([sys.executable, str(Path(__file__).with_name("release.py")),
+                                  "--root", str(root), "--python", sys.executable,
+                                  "deploy", interrupted, checksum], stdin=stream,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not (release / "venv/pyvenv.cfg").exists():
+                assert child.poll() is None, "installer_exited_before_fault_injection"
+                assert time.monotonic() < deadline, "installation_boundary_not_observed"
+                time.sleep(0.01)
+            assert not (release / "ready.json").exists()
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=10)
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=10)
+    assert release.exists() and not (release / "ready.json").exists()
+    assert manager.pointer("current") == versions[0]
+    assert manager.deploy(bundle, interrupted, checksum) == "activated"
+    manager.activate(versions[0])
+    print("SIGKILL_INSTALL_RETRY_AND_REPACK_IDEMPOTENCY_PASSED")
     print("OFFLINE_INSTALL_ATOMIC_SWITCH_IDEMPOTENCY_ROLLBACK_PASSED")
 
 

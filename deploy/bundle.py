@@ -1,6 +1,7 @@
 """只打包已构建的应用和校验过哈希的离线 wheel，不包含源码或配置。"""
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -52,11 +53,14 @@ def make_bundle(commit, wheel_dir, lock_path, output):
     manifest = {"version": 1, "commit": commit, "python": "3.12", "platform": "linux-x86_64",
                 "files": {name: digest(data) for name, data in files.items()}}
     files["manifest.json"] = json.dumps(manifest, sort_keys=True).encode()
-    with tarfile.open(output, "w:gz") as archive:
-        for name, data in sorted(files.items()):
-            info = tarfile.TarInfo(name)
-            info.size, info.mode, info.mtime = len(data), 0o600, 0
-            archive.addfile(info, io.BytesIO(data))
+    # gzip 默认会记录当前时间和输出文件名，两者都不属于发布内容。
+    with Path(output).open("wb") as target:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=target, mtime=0, compresslevel=9) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
+                for name, data in sorted(files.items()):
+                    info = tarfile.TarInfo(name)
+                    info.size, info.mode, info.mtime = len(data), 0o600, 0
+                    archive.addfile(info, io.BytesIO(data))
     return digest(Path(output).read_bytes())
 
 

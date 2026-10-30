@@ -24,7 +24,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from images import ImageError, MAX_IMAGE_BYTES, image_url, select_images, validate_image
+if __package__:
+    from .images import ImageError, MAX_IMAGE_BYTES, image_url, select_images, validate_image
+else:
+    from images import ImageError, MAX_IMAGE_BYTES, image_url, select_images, validate_image
 
 TITLE = re.compile(r"^\*{0,2}(?:(?:20\d{2}\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日\s*)?AI\s+Infra\s+晨报(?=[\s：:*]|$)", re.I)
 TS = re.compile(r"^[0-9]{10,12}\.[0-9]{6}$")

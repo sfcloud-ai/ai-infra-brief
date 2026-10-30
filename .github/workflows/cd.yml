@@ -1,21 +1,14 @@
-name: prototype-stage-candidate
+name: t4-controlled-release
 
 on:
   push:
     branches: [main]
-    paths:
-      - '**.py'
-      - 'ai_brief/resources/**'
-      - 'deploy/**'
-      - 'pyproject.toml'
-      - 'requirements*.lock'
-      - '.github/workflows/cd.yml'
 
 permissions:
   contents: read
 
 concurrency:
-  group: t4-prototype-stage
+  group: t4-production-release
   cancel-in-progress: false
 
 jobs:
@@ -23,7 +16,7 @@ jobs:
     if: >-
       github.repository == 'sfcloud-ai/ai-infra-brief' &&
       github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      vars.PROTOTYPE_CD_ENABLED == 'true'
+      vars.CD_ENABLED == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -35,16 +28,16 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r deploy/build.lock
-          .venv/bin/python -m compileall -q ai_brief deploy tests
+          .venv/bin/python -m compileall -q ai_brief deploy integrations/slack_wecom tests
           .venv/bin/python -m unittest discover -s tests -v
           .venv/bin/python -B integrations/slack_wecom/run_tests.py --require-unix-socket
           .venv/bin/python -B scripts/check_public_tree.py
-  stage:
+  deploy:
     needs: verify
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    environment: t4-prototype
-    timeout-minutes: 15
+    environment: t4-production
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -56,9 +49,14 @@ jobs:
           .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r deploy/build.lock
           mkdir "$RUNNER_TEMP/wheels"
           .venv/bin/python -m pip download --require-hashes --only-binary=:all: -r deploy/runtime.lock -d "$RUNNER_TEMP/wheels"
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
           .venv/bin/python -m pip wheel --no-deps --no-build-isolation . -w "$RUNNER_TEMP/wheels"
           .venv/bin/python deploy/bundle.py --commit "$GITHUB_SHA" --wheels "$RUNNER_TEMP/wheels" --output "$RUNNER_TEMP/release.tar.gz"
-      - name: Stage prototype through restricted SSH command
+      - name: Reject superseded main revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: test "$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)" = "$GITHUB_SHA"
+      - name: Replace the single relay instance through restricted SSH
         env:
           T4_SSH_HOST: ${{ secrets.T4_SSH_HOST }}
           T4_SSH_USER: ${{ secrets.T4_SSH_USER }}
