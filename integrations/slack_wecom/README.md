@@ -2,13 +2,13 @@
 
 把一个指定 Slack 私信中的新晨报转发到企业微信群机器人。支持正文和直接附带的 PNG/JPEG 图片，只使用 Python 标准库。
 
-这是用户提供的既有转发器源码，已作为 `sfcloud-ai/ai-infra-brief` 的独立模块整合。运行变更包括接纳符合过滤条件的 `file_share` 晨报、在解析本地 HTTP 请求之前设置超时，以及为图片下载增加覆盖阻塞读取的总超时。注释和文档字符串改为中文。原始导出记录见 `SOURCE_EXPORT.json`，本次变更和原AST指纹见 `INTEGRATION.json`。目录不含实际凭据、账号/服务器配置或运行数据；本次未操作原线上服务，也没有增加自动部署。
+独立源码入口使用 `relay.py`；随主项目 wheel 安装的 `ai-brief-relay` 提供保留游标的受控运行入口。自动发布与服务交接见 [T4 部署](../../deploy/README.md)。
 
 ## 接入晨报项目
 
 建议保持单一路径：晨报项目生成内容并发到 Slack，由本模块负责转发到企业微信。不要同时从晨报生成器直接向同一微信群发送，以免重复推送。
 
-1. 本目录已位于 `integrations/slack_wecom/`，保持两个 Python 运行文件相邻。当前使用同目录导入，不能只移动其中一个文件；它不随主流水线 wheel 安装，作为独立源码服务维护。
+1. 使用源码入口时保持本目录的 Python 文件相邻；使用受控发布时，转发器随主项目 wheel 安装。
 2. 晨报第一行使用 `AI Infra 晨报`，允许日期前缀和 Slack 粗体标记。正文与图片放在同一条消息内，图片应作为 Slack `files` 附件共享。
 3. 独立运行本模块，通过配置指定工作区、用户、私信和发送者，不让晨报生成器接触转发凭据。
 4. 初次整合先运行离线测试。实际发送测试需另行明确内容和目标，测试不会主动发消息。
@@ -43,7 +43,7 @@ Slack 使用 **User Token**：文字需要 `im:history`，图片额外需要 `fi
 
 ## 在 Linux 上运行
 
-已测试的运行环境是 Linux + Python 3.12。不支持直接在 Windows 上运行服务：文件权限检查、Unix socket、`SO_PEERCRED` 和 `flock` 依赖 Linux/POSIX 能力。
+使用 Linux + Python 3.12。不支持直接在 Windows 上运行服务：文件权限检查、Unix socket、`SO_PEERCRED` 和 `flock` 依赖 Linux/POSIX 能力。
 
 ```sh
 RELAY_ROOT="$HOME/.local/share/morning-brief-relay"
