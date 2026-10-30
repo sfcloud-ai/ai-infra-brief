@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from deploy.policy import Policy, PolicyError
 from deploy.release import ReleaseError, Releases, write_json
@@ -14,6 +14,7 @@ from deploy.ssh_entry import parse_command
 from deploy.stage_helper import execute
 from deploy.supervisor import DockerDriver, ServiceError
 from deploy import transport
+from deploy import release as release_module
 from integrations.slack_wecom.runtime import ControlledRelay
 from test_relay_integration import relay, relay_fixtures
 from deploy.relay_resume import binding, resume_class
@@ -212,6 +213,18 @@ class RestrictedHelperTests(unittest.TestCase):
 
 
 class RetentionTests(unittest.TestCase):
+    def test_low_space_is_rejected_before_reading_or_writing_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            incoming = Mock()
+            arguments = ["release.py", "--root", directory, "--python", "/python",
+                         "deploy", "a" * 40, "d" * 64]
+            with patch("sys.argv", arguments), patch("sys.stdin", incoming), \
+                    patch("deploy.release.shutil.disk_usage", return_value=SimpleNamespace(free=1)):
+                with self.assertRaisesRegex(ReleaseError, "temporary_free_space_limit"):
+                    release_module.main()
+            incoming.buffer.read.assert_not_called()
+            self.assertEqual(list((Path(directory) / "incoming").iterdir()), [])
+
     def test_abandoned_temporary_cleanup_rejects_symlink_and_preserves_external_files(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = Releases(directory, "/python", reserve=0)

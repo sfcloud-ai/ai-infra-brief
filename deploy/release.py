@@ -135,6 +135,10 @@ class Releases:
                     raise ReleaseError("unexpected_temporary_path")
                 shutil.rmtree(path)
 
+    def require_free_space(self, temporary_bytes):
+        if shutil.disk_usage(self.root).free < self.reserve + temporary_bytes:
+            raise ReleaseError("temporary_free_space_limit")
+
     def pointer(self, name):
         path = self.root / name
         if not path.is_symlink():
@@ -237,6 +241,7 @@ class Releases:
         release = self.root / "releases" / commit
         if not SHA.fullmatch(commit):
             raise ReleaseError("invalid_commit")
+        self.require_free_space(MAX_CONTENT)
         # 生产入口持 deployment.lock；先完整验证新包，再处理被强制中断的旧目录。
         with tempfile.TemporaryDirectory(prefix="validate-", dir=self.root / "incoming") as directory:
             validated = Path(directory) / "release"
@@ -298,6 +303,8 @@ def main():
         if args.operation == "rollback":
             result = manager.activate(args.commit)
         else:
+            # 上传和解包可同时存在；在接收任何字节前预留峰值临时空间。
+            manager.require_free_space(MAX_BUNDLE + MAX_CONTENT)
             with tempfile.TemporaryDirectory(prefix="upload-", dir=manager.root / "incoming") as directory:
                 path = Path(directory) / "bundle.tar.gz"
                 count = 0
@@ -309,6 +316,7 @@ def main():
                         count += len(data)
                         if count > MAX_BUNDLE:
                             raise ReleaseError("bundle_too_large")
+                        manager.require_free_space(len(data))
                         target.write(data)
                 result = manager.deploy(path, args.commit, args.checksum or "")
         print(json.dumps({"prototype_release": result, "commit": args.commit, "services_changed": False}))
