@@ -2,7 +2,7 @@
 
 AI Infra 晨报将研究规则、编辑规则、历史去重、报告生成和投递状态分开管理。项目关注模型服务基础设施，以及制造业具身相关的训练技术；规则位于 `ai_brief/resources/prompts/`。
 
-晨报流水线提供本地 **mock/simulation** 模式：默认使用空 fixture，生成 JSON、Markdown 和 SVG，不联网、不调用真实模型、不读取发送凭据，也不会发布消息或创建调度。真实研究、语义去重和 Slack 上传／发布接口尚未接入；`live` 或未知 adapter 会报错，不会自动降级为 mock。
+晨报流水线使用本地 **mock/simulation** 模式，从 fixture 生成 JSON、Markdown 和 SVG，并将模拟投递回执保存在本地。默认输入为空 fixture；运行模式配置为 `live` 或未知 adapter 时会报错。
 
 仓库另含独立的 [Slack → 企业微信转发器](integrations/slack_wecom/README.md)。其服务命令会读取私有配置并联网，需单独配置和启动；运行晨报流水线不会启动它。
 
