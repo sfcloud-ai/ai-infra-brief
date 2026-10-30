@@ -124,6 +124,17 @@ class Releases:
                 or shutil.disk_usage(self.root).free < self.reserve + incoming_bytes):
             raise ReleaseError("retention_or_free_space_limit")
 
+    def cleanup_abandoned(self):
+        # 仅在 CLI 已取得独占锁后清理上次 SIGKILL 遗留的专用临时目录。
+        for parent, pattern in ((self.root / "incoming", r"(?:upload|validate)-[a-z0-9_]{8}"),
+                                (self.root / "checks", r"health-[a-z0-9_]{8}")):
+            for path in parent.iterdir():
+                info = path.lstat()
+                if (not re.fullmatch(pattern, path.name) or not stat.S_ISDIR(info.st_mode)
+                        or info.st_uid != os.getuid()):
+                    raise ReleaseError("unexpected_temporary_path")
+                shutil.rmtree(path)
+
     def pointer(self, name):
         path = self.root / name
         if not path.is_symlink():
@@ -282,6 +293,7 @@ def main():
     fd = os.open(manager.root / "deployment.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        manager.cleanup_abandoned()
         manager.recover()
         if args.operation == "rollback":
             result = manager.activate(args.commit)

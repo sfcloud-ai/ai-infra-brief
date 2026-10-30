@@ -59,7 +59,14 @@ def main():
                 child.wait(timeout=10)
     assert release.exists() and not (release / "ready.json").exists()
     assert manager.pointer("current") == versions[0]
-    assert manager.deploy(bundle, interrupted, checksum) == "activated"
+    with bundle.open("rb") as stream:
+        retried = subprocess.run([sys.executable, str(Path(__file__).with_name("release.py")),
+                                  "--root", str(root), "--python", sys.executable,
+                                  "deploy", interrupted, checksum], stdin=stream,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        assert retried.returncode == 0, "real_cli_retry_failed"
+    assert manager.pointer("current") == interrupted
+    assert not list((root / "incoming").iterdir())
     manager.activate(versions[0])
     print("SIGKILL_INSTALL_RETRY_AND_REPACK_IDEMPOTENCY_PASSED")
     print("OFFLINE_INSTALL_ATOMIC_SWITCH_IDEMPOTENCY_ROLLBACK_PASSED")

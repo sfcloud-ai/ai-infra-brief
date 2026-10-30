@@ -212,6 +212,22 @@ class RestrictedHelperTests(unittest.TestCase):
 
 
 class RetentionTests(unittest.TestCase):
+    def test_abandoned_temporary_cleanup_rejects_symlink_and_preserves_external_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = Releases(directory, "/python", reserve=0)
+            abandoned = Path(directory) / "incoming/upload-abcdefgh"
+            abandoned.mkdir()
+            (abandoned / "partial").write_text("synthetic")
+            manager.cleanup_abandoned()
+            self.assertFalse(abandoned.exists())
+            outside = Path(directory) / "external"
+            outside.mkdir()
+            (outside / "keep").write_text("synthetic")
+            abandoned.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ReleaseError, "unexpected_temporary_path"):
+                manager.cleanup_abandoned()
+            self.assertTrue((outside / "keep").exists())
+
     def test_retention_keeps_live_previous_and_requested_release(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = Releases(directory, "/python", protected={"2" * 40}, keep=5, reserve=0)
