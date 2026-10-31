@@ -4,6 +4,7 @@ from copy import deepcopy
 from html import escape
 
 from .contracts import validate
+from .delivery_format import title
 from .storage import BriefError
 
 
@@ -24,7 +25,7 @@ def prepare_relay_preview(brief, attached_files=None):
     for file in files:
         if not isinstance(file, dict) or file.get("mimetype") not in {"image/png", "image/jpeg"}:
             raise BriefError("Relay needs PNG/JPEG Slack file metadata; SVG requires rasterization and upload first")
-    lines = [f"AI Infra 晨报 · {brief['date']}"]
+    lines = [title(brief["date"])]
     if brief["mode"] == "mock":
         lines += ["模拟干跑预览，不可外发。"]
     if not brief["items"]:
