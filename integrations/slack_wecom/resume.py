@@ -52,9 +52,12 @@ def resume_class(module):
                     self.pending_messages.popleft()
                     continue
                 if self.is_brief(message):
+                    text = getattr(self, "delivery_text", module.message_text)(message)
+                    notice_key = getattr(self, "notice_key", lambda value: None)(message)
+                    extra = {"notice_key": notice_key} if notice_key is not None else {}
                     self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
-                                 module.message_text(message), timestamp, "auto", os.getuid(),
-                                 image_plans=self.image_plans(message))
+                                 text, timestamp, "auto", os.getuid(),
+                                 image_plans=self.image_plans(message), **extra)
                 self.store.set("cursor", timestamp)
                 self.pending_messages.popleft()
                 return True

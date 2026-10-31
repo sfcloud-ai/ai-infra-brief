@@ -84,13 +84,13 @@ class RelayIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads(result.stdout.strip().splitlines()[-1])
 
-    def test_original_56_tests_run_with_outbound_guard(self):
+    def test_original_and_connector_tests_run_with_outbound_guard(self):
         result = self.checked_runner()
-        self.assertEqual(result["tests_run"], 56)
+        self.assertEqual(result["tests_run"], 69)  # 原有 56 项及新增连接器 13 项。
         self.assertEqual(result["outbound_attempts"], 0)
         if result["skipped"]:
             self.assertEqual(result["skipped"], 1)
-            self.skipTest("转发器55项通过；原Unix socket项因沙箱能力不足跳过，CI严格执行。")
+            self.skipTest("原 Unix socket 项因沙箱能力不足跳过，其余项目通过；CI 严格执行。")
 
     def test_outbound_guard_rejects_socket_and_dns_before_network(self):
         result = self.checked_runner("--self-test-guard")
@@ -98,9 +98,16 @@ class RelayIntegrationTests(unittest.TestCase):
         self.assertEqual(result["blocked_before_network"], 2)
 
     def test_original_runtime_and_fixtures_preserved_except_documented_changes(self):
-        expected = read_json(RELAY_ROOT / "INTEGRATION.json")["original_ast_sha256_without_docstrings"]
+        provenance = read_json(RELAY_ROOT / "INTEGRATION.json")
+        expected = provenance["original_ast_sha256_without_docstrings"]
+        reviewed = provenance["reviewed_notice_ast_sha256_without_docstrings"]
         for filename, fingerprint in expected.items():
             tree = StripDocumentation().visit(ast.parse((RELAY_ROOT / filename).read_text()))
+            if filename in reviewed:
+                # 原始来源指纹保留在清单中；已审查的运行时更新改为固定完整新 AST。
+                actual = hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
+                self.assertEqual(actual, reviewed[filename], filename)
+                continue
             if filename == "relay.py":
                 # 包入口仅切换相对导入，独立旧入口仍使用原始 images 导入。
                 tree.body = [node.orelse[0] if isinstance(node, ast.If)

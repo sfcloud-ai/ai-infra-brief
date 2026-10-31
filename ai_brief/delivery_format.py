@@ -47,7 +47,7 @@ def prepare_notice_preview(day, subtitle, report_url, poster):
             "event_template": {"text": text, "subtype": "file_share", "files": [deepcopy(poster)]}}
 
 
-def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read_context):
+def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read_context, notice_connector=None):
     """核对实际读取的 Slack 顶层图文；不把匹配规则当作企微送达回执。"""
     if find_spec("ai_brief_relay"):
         from ai_brief_relay import relay
@@ -63,6 +63,20 @@ def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read
     if not isinstance(message, dict) or not isinstance(template.get("text"), str):
         raise BriefError("Expected a notice template and received Slack message")
     ts = message.get("ts")
+    if notice_connector is not None:
+        try:
+            if notice_connector.get("user_id") != sender_id:
+                raise relay.RelayError("untrusted_notice")
+            notice = relay.connector_notice(message, notice_connector, team_id, channel_id)
+        except (relay.RelayError, AttributeError) as error:
+            raise BriefError("Slack connector notice contract failed") from error
+        wanted = template.get("files", [])
+        if (notice["text"] != relay.plain_text(template["text"])
+                or len(wanted) != 1 or not wanted[0].get("id")
+                or notice["images"][0]["file_id"] != wanted[0]["id"]):
+            raise BriefError("Slack connector title, URL or information poster differs from plan")
+        return {"slack_status": "verified", "wecom_status": "not_checked", "publication_status": "not_checked",
+                "receipt": {"channel": channel_id, "ts": ts, "relay_request_id": "auto:" + ts}}
     receiver = relay.Relay(None, None, None, {"sender_id": sender_id})
     if (message.get("channel", channel_id) != channel_id or message.get("team", team_id) != team_id
             or not isinstance(ts, str) or not relay.TS.fullmatch(ts)

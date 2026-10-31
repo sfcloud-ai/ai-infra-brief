@@ -1,8 +1,16 @@
 {
   "schema_version": "1.0",
   "source_manifest": "SOURCE_EXPORT.json",
-  "runtime_changes": ["自动晨报接受 file_share 子类型；仍要求固定发送者、匹配标题、根消息且未经编辑。", "本地 HTTP 请求在解析请求行和请求头之前设置套接字超时。", "图片下载在服务主线程通过 POSIX 定时器施加覆盖阻塞读取的总超时；已有定时器时失败关闭。"],
-  "non_runtime_changes": ["注释与文档字符串改为中文，英文标识符不变。", "增加离线审计测试入口与主项目数据适配契约。"],
+  "runtime_changes": [
+    "自动晨报接受 file_share 子类型；仍要求固定发送者、匹配标题、根消息且未经编辑。",
+    "本地 HTTP 请求在解析请求行和请求头之前设置套接字超时。",
+    "图片下载在服务主线程通过 POSIX 定时器施加覆盖阻塞读取的总超时；已有定时器时失败关闭。",
+    "增加固定用户与 App 的 Pages 通知格式、附件身份校验、归属移除及版次 URL 与原时间戳双重去重；保留原发送者。"
+  ],
+  "non_runtime_changes": [
+    "注释与文档字符串改为中文，英文标识符不变。",
+    "增加离线审计测试入口与主项目数据适配契约。"
+  ],
   "original_ast_sha256_without_docstrings": {
     "relay.py": "4a9199a5f30cab9b3c928c8156e7cc793d86eb87ba5c1666b8c3ead7f859bf03",
     "images.py": "dc795d1c0d91d5b45b5aeb120022214bc472540c47b16965439be9ca453880c1",
@@ -11,5 +19,8 @@
   },
   "external_send_executed": false,
   "deployment_executed": false,
-  "real_research_and_slack_publisher": "not_connected"
+  "real_research_and_slack_publisher": "not_connected",
+  "reviewed_notice_ast_sha256_without_docstrings": {
+    "relay.py": "e23c32378f2fcbc63e0e32f5f4859a751142db7ed04fcec8eebbcd81457b5d0c"
+  }
 }
