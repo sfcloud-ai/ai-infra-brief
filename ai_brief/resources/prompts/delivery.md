@@ -4,7 +4,7 @@
 
 ## 顶层图文消息
 
-首行使用 `AI Infra 晨报 · YYYY-MM-DD · 本期子标题`，下一段只放已核验的当天 Pages 索引 URL，同一条消息直接附一张 Slack 托管 PNG/JPEG 海报。发布后实际事件应为顶层 `file_share`。固定前缀保持现有 relay 可识别，不另写长导读，不把完整报告塞进消息。发布工具须关闭链接/媒体 unfurl，不添加 section accessory 或额外 attachments；实际读取出现这些附加可见内容时拒绝验收。`晨报` 后保留空格；旧的 `AI Infra 晨报｜10 月 31 日` 不满足当前标题正则。
+首行使用 `AI Infra 晨报 · YYYY-MM-DD · 本期子标题`，下一段只放已核验的当天 Pages 索引 URL，同一条顶层消息直接附一张 Slack 托管 PNG/JPEG 海报。原机器人路径使用 `file_share`；已启用并固定身份的 `notice_connector` 路径允许实际 history 不含 subtype，或为 `file_share`，不得补造字段。固定前缀保持 relay 可识别，不另写长导读，不把完整报告塞进消息。发布工具须关闭链接/媒体 unfurl，不添加 section accessory 或额外 attachments；实际读取出现这些附加可见内容时拒绝验收。`晨报` 后保留空格；旧的 `AI Infra 晨报｜10 月 31 日` 不满足当前标题正则。
 
 文字经实际 relay 渲染后不超过 1,900 UTF-8 字节，使标题与完整 URL 保持在一片中。过长应精简子标题或采用已核验的规范路径，不截断 URL，不设计跨消息长文重组，不擅用第三方短链。
 
@@ -29,12 +29,13 @@
 
 - Slack：从已认证工作区和固定目的地读取消息，核对 sender、顶层、未编辑、规范标题、完整 URL 和单张附件 ID。支持的 blocks 必须包含相同可见正文；fallback 有 URL 而 blocks 仅有摘要或不可验证控件时，不能宣称可见内容合格。
 - `prepare_notice_preview` 只生成离线模板，`delivery_allowed=false`、`publication_status=not_checked`。它不访问 Pages、不上传图片，也不是 Slack API 参数。`check_received_notice` 使用真实 relay 的解析、过滤、分片及图片选择函数核对读取结果；必须提供实际认证得到的 `read_context={channel_id, team_id}`。原始 history 可以没有逐条 channel/team，但已有字段必须一致。
+- 使用连接器时，向 `check_received_notice` 传入与部署状态一致的 `notice_connector`：精确用户、App、工具归属、报告站根 URL 和启用截止游标。实际用户、App、无 bot_id、未编辑顶层消息、可见正文与回退文字、归属块、版次 URL 及单张附件所有者均须通过校验。工具自动加入归属，调用方不手动补写。只有通过全部校验才从企微正文移除工具归属。配置和结构细节见 `integrations/slack_wecom/NOTICE_CONNECTOR.md`；未启用该配置不能假定连接器消息会被转发。
 - 校验返回真实 Slack ts 与 `auto:<ts>`，始终保留 `wecom_status=not_checked`、`publication_status=not_checked`。标题匹配、附件元数据通过、离线假传输成功均不代表企微送达或网页可访问。
 - 企微：已有权限的执行者核对对应 relay 请求的文字和图片状态，文字 `parts_sent == parts_total`、海报为 `sent`；再在获准目的地检查可见内容、顺序和图中文字。缺回执、`partial`、`failed`、`unknown` 均不算完整成功。
-- 通知账本关联报告版本、发布 commit、Pages URL、海报摘要、目的地与真实 Slack ts。当前 relay 仅按源消息去重；重发产生新 ts，仍可能重复转发。未知结果先核对已有回执，不自动重发、补发历史，不靠编辑旧消息期待补转发。
+- 通知账本关联报告版本、发布 commit、Pages URL、海报摘要、目的地与真实 Slack ts。已配置连接器按版次 URL 与源时间戳同时去重，同一版次换 ts 或附件 ID 也不会自动重发；新 `rN` 是独立版次。原机器人路径仍按源消息去重。未知结果先核对已有回执，不自动重发、补发历史，不靠编辑旧消息期待补转发。
 
 ## 责任边界
 
-云端任务读取同一 commit 的研究、编辑及本契约；本地应用仍是 mock runner；Slack 发布工具、relay、报告仓库机器人和 Pages 发布是独立步骤。此 PR 不修改定时任务、生产服务或权限，不把离线模板接成真实发布器。真实 Slack→企微联调须在明确授权的测试范围进行。
+云端任务读取同一 commit 的研究、编辑及本契约；本地应用的演练仍是 mock runner；Slack 发布工具、relay、报告仓库机器人和 Pages 发布是独立步骤。更新契约不会自行修改定时任务、生产服务或权限，也不把离线模板接成真实发布器。真实 Slack→企微联调须在明确授权的测试范围进行。
 
-回归采用合成消息、合成图片和假传输，验证现有函数对标题、blocks、URL、顶层 sender、图片计划与同一源消息去重的行为。报告站和机器人在独立报告仓库接入；不新增晨报 SQLite 历史库，也不改 relay 现有 SQLite 账本。
+回归采用合成消息、合成图片和假传输，验证标题、blocks、URL、精确身份、图片计划、版次与源消息去重。报告站和机器人在独立报告仓库接入。relay 继续使用原 SQLite 账本并保存独立连接器身份摘要与版次映射；原时间戳来源键兼容旧版。启用时保留游标与历史，不重置投递状态。

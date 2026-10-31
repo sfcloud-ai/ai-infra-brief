@@ -14,6 +14,7 @@ from integrations.slack_wecom import relay
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/slack_wecom"))
 import test_images as image_fixtures
 import test_relay as relay_fixtures
+import test_notice_connector as notice_fixtures
 sys.path.pop(0)
 
 URL = "https://example.org/reports/2026-10-31/"
@@ -137,6 +138,26 @@ class DeliveryFormatTests(unittest.TestCase):
         for day in ("2026-02-30", "20261031", None):
             with self.assertRaises(BriefError):
                 title(day)
+
+    def test_connector_raw_history_matches_plan_but_does_not_claim_delivery(self):
+        message = notice_fixtures.notice()
+        profile = notice_fixtures.PROFILE
+        url = profile["report_base_url"] + "2026-11-01/r1/"
+        plan = prepare_notice_preview("2026-11-01", "Scheduling and memory", url, message["files"][0])
+        def check(m, **changes):
+            return check_received_notice(plan, m, channel_id="DFIXED", sender_id="UOWNER", team_id="TTEST",
+                                         read_context={"channel_id": "DFIXED", "team_id": "TTEST"},
+                                         notice_connector={**profile, **changes})
+        result = check(message)
+        self.assertEqual(result["slack_status"], "verified")
+        self.assertEqual(result["wecom_status"], "not_checked")
+        self.assertEqual(result["publication_status"], "not_checked")
+        for changed in ({**message, "app_id": "AOTHER"}, notice_fixtures.notice(file_id="FOTHER"),
+                        notice_fixtures.notice(revision=2)):
+            with self.assertRaises(BriefError):
+                check(changed)
+        with self.assertRaises(BriefError):
+            check(message, user_id="UOTHER")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import argparse
 import base64
 import contextlib
 import decimal
+from datetime import date
 import hashlib
 import http.client
 import http.server
@@ -83,7 +84,7 @@ def load_config(root):
         secure_dir(path)
     config = json.loads(secure_read(root / "config.json"))
     required = {"team_id", "user_id", "channel_id", "sender_id", "poll_seconds"}
-    if (not required <= set(config) or set(config) - required - {"forward_images"}
+    if (not required <= set(config) or set(config) - required - {"forward_images", "notice_connector"}
             or not 30 <= config["poll_seconds"] <= 3600
             or type(config.get("forward_images", False)) is not bool):
         raise RelayError("invalid_config", 500)
@@ -91,7 +92,116 @@ def load_config(root):
                         ("channel_id", "D"), ("sender_id", "U")):
         if not re.fullmatch(prefix + r"[A-Z0-9]+", config[key]):
             raise RelayError("invalid_config", 500)
+    if "notice_connector" in config:
+        profile = validate_notice_connector(config["notice_connector"])
+        if (not config.get("forward_images") or profile["user_id"] != config["user_id"]
+                or profile["user_id"] == config["sender_id"]):
+            raise RelayError("invalid_notice_connector", 500)
     return config
+
+
+def validate_notice_connector(profile):
+    """固定一个用户授权的 App，同时保留原晨报发送者。"""
+    keys = {"user_id", "app_id", "attribution_text", "report_base_url", "not_before"}
+    if not isinstance(profile, dict) or set(profile) != keys:
+        raise RelayError("invalid_notice_connector", 500)
+    if (not isinstance(profile["user_id"], str) or not re.fullmatch(r"U[A-Z0-9]+", profile["user_id"])
+            or not isinstance(profile["app_id"], str) or not re.fullmatch(r"A[A-Z0-9]+", profile["app_id"])
+            or not isinstance(profile["not_before"], str) or not TS.fullmatch(profile["not_before"])
+            or not isinstance(profile["attribution_text"], str) or len(profile["attribution_text"]) > 200
+            or not re.fullmatch(r"\*[^*\r\n<>]+\* <@U[A-Z0-9]+>", profile["attribution_text"])):
+        raise RelayError("invalid_notice_connector", 500)
+    base = profile["report_base_url"]
+    try:
+        u = urllib.parse.urlsplit(base)
+        valid = (isinstance(base, str) and u.scheme == "https" and u.hostname
+                 and not u.username and not u.password and u.port in (None, 443)
+                 and not u.query and not u.fragment and base.endswith("/")
+                 and not any(c.isspace() or ord(c) < 32 or c in "<>&\\" for c in base))
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise RelayError("invalid_notice_connector", 500)
+    return profile
+
+
+def notice_url_day(url, profile):
+    if not isinstance(url, str):
+        raise RelayError("notice_url_rejected")
+    match = re.fullmatch(re.escape(profile["report_base_url"]) + r"(\d{4}-\d{2}-\d{2})/r([1-9]\d*)/", url)
+    try:
+        valid = match and date.fromisoformat(match[1]).isoformat() == match[1]
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RelayError("notice_url_rejected")
+    return match[1]
+
+
+def connector_notice(message, profile, team_id, channel_id):
+    """校验经认证读取的原始历史，仅返回通过校验且移除工具归属的正文。"""
+    validate_notice_connector(profile)
+    if (not isinstance(message, dict) or message.get("user") != profile["user_id"]
+            or message.get("app_id") != profile["app_id"] or message.get("bot_id") is not None
+            or message.get("type") != "message" or message.get("subtype") not in (None, "file_share")
+            or "edited" in message or message.get("hidden")
+            or message.get("team", team_id) != team_id or message.get("channel", channel_id) != channel_id
+            or not isinstance(message.get("ts"), str) or not TS.fullmatch(message["ts"])
+            or message.get("thread_ts", message["ts"]) != message["ts"]
+            or decimal.Decimal(message["ts"]) <= decimal.Decimal(profile["not_before"])
+            or message.get("attachments") not in (None, [])):
+        raise RelayError("untrusted_notice")
+    blocks = message.get("blocks")
+    if (not isinstance(blocks, list) or len(blocks) != 2
+            or any(not isinstance(b, dict) or set(b) - {"type", "block_id", "elements"} for b in blocks)
+            or blocks[0].get("type") != "rich_text" or blocks[1].get("type") != "context"):
+        raise RelayError("notice_blocks_rejected")
+    sections, footer = blocks[0].get("elements"), blocks[1].get("elements")
+    if (not isinstance(sections, list) or len(sections) != 1 or not isinstance(sections[0], dict)
+            or set(sections[0]) != {"type", "elements"} or sections[0]["type"] != "rich_text_section"
+            or footer != [{"type": "mrkdwn", "text": profile["attribution_text"], "verbatim": False}]):
+        raise RelayError("notice_blocks_rejected")
+    elements = sections[0]["elements"]
+    if (not isinstance(elements, list) or len(elements) not in (2, 3)
+            or any(not isinstance(e, dict) or set(e) != {"type", "text"} or e["type"] != "text"
+                   or not isinstance(e["text"], str) for e in elements[:-1])):
+        raise RelayError("notice_blocks_rejected")
+    prefix = "".join(e["text"] for e in elements[:-1])
+    link = elements[-1]
+    if (not isinstance(link, dict) or link.get("type") != "link"
+            or set(link) - {"type", "url", "text", "from_llm", "truncated"}
+            or any(k in link and type(link[k]) is not bool for k in ("from_llm", "truncated"))):
+        raise RelayError("notice_link_rejected")
+    url = link.get("url")
+    day = notice_url_day(url, profile)
+    label = link.get("text", url)
+    if not isinstance(label, str) or label not in {url, url.rstrip("/"), url.removeprefix("https://"), url.removeprefix("https://").rstrip("/")}:
+        raise RelayError("notice_link_label_rejected")
+    if not prefix.endswith("\n\n") or "\n" in prefix[:-2] or "\r" in prefix:
+        raise RelayError("notice_title_rejected")
+    heading = prefix[:-2]
+    marker = "AI Infra 晨报 · " + day + " · "
+    if (not heading.startswith(marker) or not heading[len(marker):].strip()
+            or len(heading[len(marker):].encode()) > 180 or any(c in heading for c in "<>")):
+        raise RelayError("notice_title_rejected")
+    core = prefix + url
+    fallback = message.get("text")
+    if isinstance(fallback, str):
+        fallback = fallback.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    allowed = {core, prefix + "<" + url + ">", prefix + "<" + url + "|" + label + ">"}
+    if (not isinstance(fallback, str) or fallback not in {value + " " + profile["attribution_text"] for value in allowed}
+            or len(core.encode()) > 1900):
+        raise RelayError("notice_fallback_rejected")
+    files = message.get("files")
+    if (not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict)
+            or files[0].get("user") != profile["user_id"] or files[0].get("user_team") != team_id):
+        raise RelayError("notice_poster_owner_rejected")
+    plans = select_images(message, team_id)
+    if len(plans) != 1 or "error" in plans[0]:
+        raise RelayError("notice_poster_rejected")
+    return {"text": core, "url": url, "images": plans}
+
+
 
 
 def load_secrets(root):
@@ -495,6 +605,33 @@ class Relay:
         self.store, self.slack, self.wecom, self.config = store, slack, wecom, config
         self.clock, self.sleeper = clock, sleeper
         self.connected = False
+        profile = config.get("notice_connector")
+        if profile is not None:
+            validate_notice_connector(profile)
+        if store is not None:
+            saved = store.get("notice_connector_v1")
+            expected = digest(profile) if profile is not None else None
+            if saved is not None and saved != expected:
+                raise RelayError("notice_identity_changed", 409)
+            if profile is not None and saved is None:
+                store.set("notice_connector_v1", expected)
+
+    def notice(self, message):
+        profile = self.config.get("notice_connector")
+        if profile is None or message.get("user") != profile["user_id"]:
+            return None
+        try:
+            return connector_notice(message, profile, self.config["team_id"], self.config["channel_id"])
+        except RelayError:
+            return None
+
+    def delivery_text(self, message):
+        notice = self.notice(message)
+        return notice["text"] if notice else message_text(message)
+
+    def notice_key(self, message):
+        notice = self.notice(message)
+        return notice["url"] if notice else None
 
     def baseline(self):
         # 重启或断线恢复后也使用此逻辑，绝不补发停机期间的历史消息。
@@ -505,6 +642,9 @@ class Relay:
         self.connected = True
 
     def is_brief(self, message):
+        profile = self.config.get("notice_connector")
+        if profile is not None and message.get("user") == profile["user_id"]:
+            return self.notice(message) is not None
         text = message_text(message)
         subtype = message.get("subtype")
         return (message.get("user") == self.config["sender_id"]
@@ -531,8 +671,8 @@ class Relay:
                     continue
                 if self.is_brief(message):
                     self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
-                                 message_text(message), timestamp, "auto", os.getuid(),
-                                 image_plans=self.image_plans(message))
+                                 self.delivery_text(message), timestamp, "auto", os.getuid(),
+                                 image_plans=self.image_plans(message), notice_key=self.notice_key(message))
                 self.store.set("cursor", timestamp)
         except Exception:
             self.connected = False
@@ -578,25 +718,34 @@ class Relay:
         message = self.slack.exact(timestamp, thread_ts)
         if message.get("ts") != timestamp:
             raise RelayError("message_mismatch", 502)
-        return self.deliver(request_id, intent, message_text(message),
+        return self.deliver(request_id, intent, self.delivery_text(message),
                             timestamp, "manual_slack", uid, repeat, reason,
-                            image_plans=self.image_plans(message))
+                            image_plans=self.image_plans(message), notice_key=self.notice_key(message))
 
-    def deliver(self, request_id, intent, text, timestamp, mode, uid, repeat=False, reason="", image_plans=()):
+    def deliver(self, request_id, intent, text, timestamp, mode, uid, repeat=False, reason="", image_plans=(), notice_key=None):
         pieces = chunks(text)
         source = digest([self.config["team_id"], self.config["channel_id"], timestamp]) if timestamp else None
+        edition = None
+        if notice_key is not None:
+            notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")))
+            edition = "notice_edition:" + digest([self.config["team_id"], self.config["channel_id"], notice_key])
         db = self.store.db
         row = db.execute("SELECT intent_hash FROM requests WHERE id=?", (request_id,)).fetchone()
         if row:
             if row[0] != digest(intent):
                 raise RelayError("request_id_conflict", 409)
             return self.store.status(request_id)
-        prior = db.execute("SELECT status FROM requests WHERE source_key=? ORDER BY created DESC LIMIT 1", (source,)).fetchone() if source else None
+        # 保留旧版可识别的来源键；版次映射与请求原子落盘，回退或编辑均不会丢失时间戳去重。
+        edition_request = self.store.get(edition) if edition else None
+        prior = db.execute("SELECT status FROM requests WHERE source_key=? OR message_ts=? OR id=? ORDER BY created DESC LIMIT 1",
+                           (source, timestamp, edition_request)).fetchone() if source else None
         status = "sending"
         if prior and not repeat:
             status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
         db.execute("INSERT INTO requests(id,intent_hash,source_key,mode,actor_uid,created,message_ts,status,parts_total,reason_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (request_id, digest(intent), source, mode, uid, self.clock(), timestamp, status, len(pieces) + len(image_plans), digest(reason) if reason else None))
+        if edition and (edition_request is None or status == "sending"):
+            db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (edition, request_id))
         if status == "sending":
             for index, plan in enumerate(image_plans):
                 db.execute("INSERT INTO image_parts(request_id,file_id,ordinal,status) VALUES (?,?,?,'pending')", (request_id, plan["file_id"], index))
