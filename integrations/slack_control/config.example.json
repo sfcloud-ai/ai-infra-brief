@@ -1,0 +1,9 @@
+{
+  "team_id": "",
+  "channel_id": "",
+  "responder_user_id": "",
+  "responder_bot_id": "",
+  "allowed_users": [],
+  "allowed_bots": [],
+  "poll_seconds": 60
+}
