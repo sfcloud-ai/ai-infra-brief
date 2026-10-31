@@ -85,6 +85,8 @@ python3 -m venv .venv
 
 ### 接入独立转发器
 
+真实任务长期采用「本期子标题 + 已发布的 Pages URL + 单张信息海报」，完整分析放在独立报告站的日期索引与子文章中，详见 [投递契约](ai_brief/resources/prompts/delivery.md)。编辑 Prompt 引用同一提交的契约。`prepare_notice_preview` 生成离线模板，`check_received_notice` 使用真实 relay 函数校验实际读取的 Slack 图文；两者不发送消息、不验证网页可访问，也不把 Slack 校验当作企微送达。
+
 `ai_brief.relay_contract.prepare_relay_preview` 可将符合 schema 的晨报转换为离线事件模板，首行规范为 `AI Infra 晨报 · 日期`。`event_template` **不是 Slack 发布 API 参数**，`delivery_allowed` 始终为 `false`，调用它不会上传或发送消息。
 
 独立转发器接收固定 Slack 私信、固定发送者的晨报及直接附带的 PNG/JPEG 图片。流水线生成的 SVG 需要先转成 PNG/JPEG，再通过独立实现的 Slack 上传和发布步骤交给转发器。转发器的凭据配置、服务启动、手动入口和投递边界见 [模块用法](integrations/slack_wecom/README.md)。

@@ -323,9 +323,9 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("<script>", (Path(result["run_dir"]) / "brief.md").read_text())
 
     def test_versioned_prompts_require_useful_not_boilerplate_caveats(self):
-        for filename in ("research.md", "editor.md"):
+        for filename, version in (("research.md", "v1.2"), ("editor.md", "v1.3")):
             text = (RESOURCE_ROOT / "prompts" / filename).read_text()
-            for required in ("v1.2", "不堆", "未独立复现", "作者报告", "影响选型", "紧邻", "空字符串", "来源"):
+            for required in (version, "不堆", "未独立复现", "作者报告", "影响选型", "紧邻", "空字符串", "来源"):
                 self.assertIn(required, text)
 
     def test_no_material_limitation_omits_line_without_boilerplate(self):
