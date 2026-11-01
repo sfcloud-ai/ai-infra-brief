@@ -62,6 +62,17 @@ class RelayPackagingTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout),
                          {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0})
 
+    def test_installed_notice_checker_needs_no_brief_package_and_fails_closed(self):
+        command = str(self.environment / "bin/ai-brief-notice-check")
+        help_result = subprocess.run([command, "--help"], cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        result = subprocess.run([command, "--root", str(self.root / "missing")], input="{}",
+                                cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["slack_status"], "not_verified")
+        self.assertEqual(json.loads(result.stdout)["messages_sent"], 0)
+        self.assertEqual(result.stderr, "")
+
     def test_bundle_rejects_accidentally_embedded_prompt(self):
         directory = self.root / "invalid"
         directory.mkdir()

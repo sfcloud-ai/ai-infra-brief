@@ -70,76 +70,14 @@ def prepare_article_notice_preview(report_bytes, report_base_url, poster, *, pub
 
 
 def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read_context, notice_connector=None, actual_poster_bytes=None):
-    """核对实际读取的 Slack 顶层图文；不把匹配规则当作企微送达回执。"""
+    """复用独立转发器安装包中的同一套通知校验函数。"""
     if find_spec("ai_brief_relay"):
-        from ai_brief_relay import relay
-        from ai_brief_relay.images import select_images
+        from ai_brief_relay.notice_check import check_received_notice as check, NoticeCheckError
     else:
-        from integrations.slack_wecom import relay
-        from integrations.slack_wecom.images import select_images
-
-    if (not all(isinstance(value, str) and value for value in (channel_id, sender_id, team_id))
-            or read_context != {"channel_id": channel_id, "team_id": team_id}):
-        raise BriefError("Authenticated Slack read context differs from expected destination")
-    template = plan.get("event_template", {})
-    if not isinstance(message, dict) or not isinstance(template.get("text"), str):
-        raise BriefError("Expected a notice template and received Slack message")
-    ts = message.get("ts")
-    def poster_receipt(image):
-        if plan.get("notice_manifest") is None:
-            return {}
-        try:
-            expected = plan["notice_manifest"]["poster"]["sha256"]
-            if not isinstance(actual_poster_bytes, bytes) or len(actual_poster_bytes) != image["size"]:
-                raise relay.ImageError("notice_poster_bytes_required")
-            relay.validate_image(actual_poster_bytes, image["mime"])
-            actual_hash = hashlib.sha256(actual_poster_bytes).hexdigest()
-            if actual_hash != expected:
-                raise relay.ImageError("notice_poster_hash_mismatch")
-        except (relay.ImageError, KeyError, TypeError) as error:
-            raise BriefError("Actual Slack poster must exactly match published source bytes") from error
-        return {"file_id": image["file_id"], "transport_sha256": actual_hash,
-                "transport_bytes": len(actual_poster_bytes)}
-
-    if notice_connector is not None:
-        try:
-            if notice_connector.get("user_id") != sender_id:
-                raise relay.RelayError("untrusted_notice")
-            notice = relay.connector_notice(message, notice_connector, team_id, channel_id,
-                                           notice_manifest=plan.get("notice_manifest"))
-        except (relay.RelayError, AttributeError) as error:
-            raise BriefError("Slack connector notice contract failed") from error
-        wanted = template.get("files", [])
-        if (notice["text"] != relay.plain_text(template["text"])
-                or len(wanted) != 1 or not wanted[0].get("id")
-                or notice["images"][0]["file_id"] != wanted[0]["id"]):
-            raise BriefError("Slack connector title, URL or information poster differs from plan")
-        return {"slack_status": "verified", "wecom_status": "not_checked", "publication_status": "not_checked",
-                "receipt": {"channel": channel_id, "ts": ts, "relay_request_id": "auto:" + ts,
-                            **poster_receipt(notice["images"][0])}}
-    receiver = relay.Relay(None, None, None, {"sender_id": sender_id})
-    if (message.get("channel", channel_id) != channel_id or message.get("team", team_id) != team_id
-            or not isinstance(ts, str) or not relay.TS.fullmatch(ts)
-            or message.get("hidden") or message.get("type", "message") != "message"
-            or message.get("subtype") != "file_share" or not receiver.is_brief(message)):
-        raise BriefError("Slack identity, title or top-level file-share contract failed")
-    expected = relay.plain_text(template["text"])
-    blocks = message.get("blocks", [])
-    if message.get("attachments") or (isinstance(blocks, list) and any(
-            isinstance(block, dict) and "accessory" in block for block in blocks)):
-        raise BriefError("Slack notice contains unsupported visible accessories or attachments")
-    if "blocks" in message and message["blocks"] != []:
-        # 空 fallback 强制检查 blocks 自身，不能用 fallback 冒充可见正文。
-        if not isinstance(message["blocks"], list) or relay.message_text({**message, "text": ""}) != expected:
-            raise BriefError("Slack visible blocks are incomplete or unverifiable")
-    actual = relay.message_text(message)
-    if actual != expected or len(relay.chunks(actual)) != 1:
-        raise BriefError("Slack visible subtitle or complete URL differs from the single-part plan")
-    files, wanted = message.get("files"), template.get("files", [])
-    selected = select_images(message, team_id)
-    if (not isinstance(files, list) or len(files) != 1 or len(wanted) != 1 or not wanted[0].get("id")
-            or len(selected) != 1 or "error" in selected[0] or selected[0].get("file_id") != wanted[0]["id"]):
-        raise BriefError("Slack direct information poster differs from plan")
-    return {"slack_status": "verified", "wecom_status": "not_checked", "publication_status": "not_checked",
-            "receipt": {"channel": channel_id, "ts": ts, "relay_request_id": "auto:" + ts,
-                        **poster_receipt(selected[0])}}
+        from integrations.slack_wecom.notice_check import check_received_notice as check, NoticeCheckError
+    try:
+        return check(plan, message, channel_id=channel_id, sender_id=sender_id, team_id=team_id,
+                     read_context=read_context, notice_connector=notice_connector,
+                     actual_poster_bytes=actual_poster_bytes)
+    except NoticeCheckError as error:
+        raise BriefError(str(error)) from error

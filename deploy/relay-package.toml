@@ -13,6 +13,7 @@ dependencies = []
 
 [project.scripts]
 ai-brief-relay = "ai_brief_relay.runtime:main"
+ai-brief-notice-check = "ai_brief_relay.notice_check:main"
 
 [tool.setuptools]
 packages = ["ai_brief_relay"]
