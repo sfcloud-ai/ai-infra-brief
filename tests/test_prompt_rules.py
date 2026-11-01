@@ -38,6 +38,19 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("不代表本地 mock renderer 已支持该版式", editor)
         self.assertIn("不能把真实研究稿伪装成 mock", editor)
 
+    def test_delivery_uses_all_article_titles_and_one_landscape_poster(self):
+        for name in ("editor.md", "delivery.md"):
+            text = (PROMPTS / name).read_text(encoding="utf-8")
+            self.assertIn("articles", text)
+            self.assertIn("横版分区总海报", text)
+            self.assertIn("子文章", text)
+            self.assertIn("无编号", text)
+            self.assertNotIn("长期消息只有一行本期子标题", text)
+        delivery = (PROMPTS / "delivery.md").read_text(encoding="utf-8")
+        self.assertIn("文字不另加各篇摘要", delivery)
+        self.assertIn("notice.json", delivery)
+        self.assertIn("访问失败保留消息和游标", delivery)
+
     def test_source_catalog_has_unique_ids_and_required_coverage(self):
         text = (PROMPTS / "sources.md").read_text(encoding="utf-8")
         ids = re.findall(r"^\| `([a-z][a-z0-9_]*)` \|", text, re.MULTILINE)

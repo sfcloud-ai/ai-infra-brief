@@ -2,12 +2,14 @@
 
 from copy import deepcopy
 import os
+import json
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
-from ai_brief.delivery_format import check_received_notice, prepare_notice_preview, title
+from ai_brief.delivery_format import check_received_notice, prepare_notice_preview, prepare_article_notice_preview, title
 from ai_brief.storage import BriefError
 from integrations.slack_wecom import relay
 
@@ -15,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/slack
 import test_images as image_fixtures
 import test_relay as relay_fixtures
 import test_notice_connector as notice_fixtures
+import test_article_notice as article_fixtures
 sys.path.pop(0)
 
 URL = "https://example.org/reports/2026-10-31/"
@@ -158,6 +161,56 @@ class DeliveryFormatTests(unittest.TestCase):
                 check(changed)
         with self.assertRaises(BriefError):
             check(message, user_id="UOTHER")
+
+
+    def test_article_preview_matches_exact_manifest_and_raw_report_bytes(self):
+        raw = (json.dumps(article_fixtures.report(), ensure_ascii=False) + "\n").encode()
+        message = article_fixtures.message()
+        plan = prepare_article_notice_preview(raw, notice_fixtures.PROFILE["report_base_url"], message["files"][0],
+                                              publication_commit=article_fixtures.COMMIT)
+        self.assertEqual(plan["notice_manifest"]["report_sha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(plan["event_template"]["text"], article_fixtures.manifest()["text"])
+        self.assertNotIn("摘要", plan["event_template"]["text"])
+        result = check_received_notice(plan, message, channel_id="DFIXED", sender_id="UOWNER", team_id="TTEST",
+                                       read_context={"channel_id": "DFIXED", "team_id": "TTEST"},
+                                       notice_connector=notice_fixtures.PROFILE, actual_poster_bytes=image_fixtures.PNG)
+        self.assertEqual(result["slack_status"], "verified")
+        self.assertEqual(result["wecom_status"], "not_checked")
+        self.assertFalse(plan["delivery_allowed"])
+
+    def test_article_receipt_requires_actual_original_poster_bytes(self):
+        raw = json.dumps(article_fixtures.report()).encode()
+        for data in (None, image_fixtures.PNG[:-1], article_fixtures.metadata_png()):
+            message = article_fixtures.message()
+            if data is not None:
+                message["files"][0]["size"] = len(data)
+            plan = prepare_article_notice_preview(raw, notice_fixtures.PROFILE["report_base_url"], message["files"][0],
+                                                  publication_commit=article_fixtures.COMMIT)
+            with self.assertRaisesRegex(BriefError, "exactly match published"):
+                check_received_notice(plan, message, channel_id="DFIXED", sender_id="UOWNER", team_id="TTEST",
+                                      read_context={"channel_id": "DFIXED", "team_id": "TTEST"},
+                                      notice_connector=notice_fixtures.PROFILE, actual_poster_bytes=data)
+
+    def test_article_nonconnector_receipt_cannot_bypass_original_byte_verification(self):
+        raw = json.dumps(article_fixtures.report()).encode()
+        plan = prepare_article_notice_preview(raw, notice_fixtures.PROFILE["report_base_url"], image_fixtures.attachment(),
+                                              publication_commit=article_fixtures.COMMIT)
+        message = {**deepcopy(plan["event_template"]), "user": "UDOT", "channel": "DFIXED", "team": "TTEST", "ts": relay_fixtures.ts(1)}
+        context = {"channel_id": "DFIXED", "sender_id": "UDOT", "team_id": "TTEST",
+                   "read_context": {"channel_id": "DFIXED", "team_id": "TTEST"}}
+        with self.assertRaisesRegex(BriefError, "exactly match published"):
+            check_received_notice(plan, message, **context)
+        result = check_received_notice(plan, message, actual_poster_bytes=image_fixtures.PNG, **context)
+        self.assertEqual(result["receipt"]["transport_sha256"], hashlib.sha256(image_fixtures.PNG).hexdigest())
+
+    def test_article_preview_rejects_invalid_publication_or_missing_poster(self):
+        raw = json.dumps(article_fixtures.report()).encode()
+        with self.assertRaises(BriefError):
+            prepare_article_notice_preview(raw, notice_fixtures.PROFILE["report_base_url"], image_fixtures.attachment(),
+                                           publication_commit="local-preview")
+        with self.assertRaises(BriefError):
+            prepare_article_notice_preview(raw, notice_fixtures.PROFILE["report_base_url"], {},
+                                           publication_commit=article_fixtures.COMMIT)
 
 
 if __name__ == "__main__":
