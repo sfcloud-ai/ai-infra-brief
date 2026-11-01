@@ -39,7 +39,9 @@ def bounded_read(connection, maximum, seconds):
 def invoke(data, root):
     # 启动读取进程或接触凭据前先解析请求；校验器再按本机私有配置逐项验证。
     request = json.loads(data.decode("utf-8"))
-    if not isinstance(request, dict) or set(request) != {"message_ts", "file_id", "notice_manifest"}:
+    fields = {"message_ts", "file_id", "notice_manifest"}
+    if (not isinstance(request, dict)
+            or set(request) not in (fields, fields | {"transport", "bundle_sha256", "bundle_bytes"})):
         raise ValueError("invalid_request")
     result = subprocess.run(
         [sys.executable, "-I", "-B", "-m", "ai_brief_relay.notice_check", "--root", str(root)],

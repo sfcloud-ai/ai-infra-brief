@@ -272,11 +272,37 @@ def _article_candidate(message, profile, team_id, elements):
     if (not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict)
             or files[0].get("user") != profile["user_id"] or files[0].get("user_team") != team_id):
         raise RelayError("notice_poster_owner_rejected")
-    plans = select_images(message, team_id)
+    plans = ([bundle_attachment(files[0], team_id)] if files[0].get("name") == notice_format.BUNDLE_FILENAME
+             else select_images(message, team_id))
     if len(plans) != 1 or "error" in plans[0]:
         raise RelayError("notice_poster_rejected")
     return {"text": text, "url": identity["index_url"], "articles": identity["articles"],
             "images": plans, "format": "article_list_v1"}
+
+
+def bundle_attachment(item, team_id):
+    """仅允许明确命名的托管 JSON 报告包携带原始海报。"""
+    try:
+        file_id, size, mime = item.get("id"), item.get("size"), item.get("mimetype")
+        if (not isinstance(file_id, str) or not re.fullmatch(r"F[A-Z0-9]{1,64}", file_id)
+                or item.get("name") != notice_format.BUNDLE_FILENAME or item.get("filetype") != "json"
+                or mime not in ("text/plain", "application/json") or item.get("mode") != "hosted"
+                or item.get("file_access") != "visible" or item.get("is_external") is not False
+                or item.get("user_team") != team_id or type(size) is not int
+                or not 0 < size <= notice_format.MAX_BUNDLE_BYTES):
+            raise ImageError("notice_bundle_metadata_rejected")
+        url = image_url(item.get("url_private") or item.get("url_private_download"), team_id, file_id)
+        return {"file_id": file_id, "url": url, "size": size, "attachment_mime": mime,
+                "transport": "report_bundle_v1"}
+    except ImageError:
+        raise RelayError("notice_bundle_rejected") from None
+
+
+def original_bundle_poster(data, plan):
+    try:
+        return notice_format.bundle_poster(data, plan["notice_manifest"], plan["report_base_url"])
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise ImageError("notice_bundle_invalid") from None
 
 
 def _bind_notice_manifest(candidate, manifest, profile):
@@ -286,6 +312,10 @@ def _bind_notice_manifest(candidate, manifest, profile):
         except (TypeError, ValueError, KeyError):
             raise RelayError("notice_manifest_rejected") from None
         candidate["images"][0]["expected_sha256"] = manifest["poster"]["sha256"]
+        plan = candidate["images"][0]
+        if plan.get("transport") == "report_bundle_v1":
+            plan.update(notice_manifest=manifest, report_base_url=profile["report_base_url"],
+                        mime="image/png" if manifest["poster"]["url"].endswith(".png") else "image/jpeg")
     return candidate
 
 
@@ -384,14 +414,25 @@ class Slack:
         self.images_authorized = "files:read" in required
 
     def download_image(self, plan):
+        data = self._download_file(plan, MAX_IMAGE_BYTES, ("image/png", "image/jpeg"))
+        validate_image(data, plan["mime"])
+        return data
+
+    def download_bundle(self, plan):
+        if plan.get("transport") != "report_bundle_v1":
+            raise ImageError("notice_bundle_transport_required")
+        return self._download_file({**plan, "mime": plan["attachment_mime"]}, notice_format.MAX_BUNDLE_BYTES,
+                                   ("text/plain", "application/json"))
+
+    def _download_file(self, plan, maximum, allowed_mimes):
         if not self.config.get("forward_images", False) or not self.images_authorized:
             raise ImageError("image_scope_not_verified")
         try:
             url = image_url(plan["url"], self.config["team_id"], plan["file_id"])
             size, mime = plan["size"], plan["mime"]
-            if type(size) is not int or not 0 < size <= MAX_IMAGE_BYTES:
+            if type(size) is not int or not 0 < size <= maximum:
                 raise ImageError("image_size_rejected")
-            if mime not in ("image/png", "image/jpeg"):
+            if mime not in allowed_mimes:
                 raise ImageError("unsupported_image_format")
             request = urllib.request.Request(url, headers={
                 "Authorization": "Bearer " + self.token, "Accept-Encoding": "identity"})
@@ -411,11 +452,11 @@ class Slack:
                 while True:
                     if time.monotonic() > deadline:
                         raise ImageError("image_download_timed_out")
-                    chunk = response.read(min(65536, MAX_IMAGE_BYTES + 1 - len(buffer)))
+                    chunk = response.read(min(65536, maximum + 1 - len(buffer)))
                     if not chunk:
                         break
                     buffer.extend(chunk)
-                    if len(buffer) > MAX_IMAGE_BYTES or len(buffer) > size:
+                    if len(buffer) > maximum or len(buffer) > size:
                         raise ImageError("image_size_rejected")
                 data = bytes(buffer)
                 if len(data) < size:
@@ -423,7 +464,6 @@ class Slack:
                     raise ImageError("image_download_incomplete")
                 if len(data) != size:
                     raise ImageError("image_size_mismatch")
-                validate_image(data, mime)
                 return data
         except ImageError:
             raise
@@ -914,7 +954,8 @@ class Relay:
             try:
                 if "error" in plan:
                     raise ImageError(plan["error"])
-                data = self.slack.download_image(plan)
+                data = (original_bundle_poster(self.slack.download_bundle(plan), plan)
+                        if plan.get("transport") == "report_bundle_v1" else self.slack.download_image(plan))
                 validate_image(data, plan["mime"])
                 if hashlib.sha256(data).hexdigest() != plan["expected_sha256"]:
                     raise ImageError("notice_poster_hash_mismatch")
