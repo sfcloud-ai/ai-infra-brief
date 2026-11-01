@@ -2,11 +2,13 @@
 
 from email.parser import Parser
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import venv
 from zipfile import ZipFile
@@ -82,3 +84,30 @@ class RelayPackagingTests(unittest.TestCase):
             archive.writestr("ai_brief/resources/prompts/research.md", "synthetic")
         with self.assertRaisesRegex(ValueError, "unexpected_relay_wheel_content"):
             make_bundle("a" * 40, directory, ROOT / "deploy/runtime.lock", self.root / "invalid.tar.gz")
+
+    def test_installed_socket_and_standalone_client_use_only_fixed_reader(self):
+        directory = self.root / "reader-socket"
+        directory.mkdir(mode=0o711)
+        directory.chmod(0o711)
+        endpoint = directory / "check.sock"
+        command = [str(self.environment / "bin/ai-brief-notice-socket"), "--socket", str(endpoint),
+                   "--publisher-uid", str(os.getuid()), "--root", str(self.root / "missing-reader-root")]
+        process = subprocess.Popen(command, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            until = time.monotonic() + 5
+            while not endpoint.exists() and process.poll() is None and time.monotonic() < until:
+                time.sleep(0.02)
+            self.assertIsNone(process.poll(), "installed reader socket exited before binding")
+            self.assertTrue(endpoint.exists())
+            client = self.environment / "bin/ai-brief-notice-client"
+            request = '{"message_ts":"1800000000.000001","file_id":"F123","notice_manifest":{}}'
+            result = subprocess.run([str(client), "--socket", str(endpoint), "--reader-uid", str(os.getuid())],
+                                    input=request, cwd=self.root, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout), {"slack_status": "not_verified", "wecom_status": "not_checked",
+                                                       "error": "notice_read_unverified", "messages_sent": 0, "state_changed": False})
+            self.assertEqual(result.stderr, "")
+            self.assertFalse((self.root / "missing-reader-root").exists())
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
