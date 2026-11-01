@@ -23,7 +23,8 @@ else:
     from supervisor import DockerDriver, ServiceError, Supervisor
 
 CONFIG = Path("/etc/ai-brief-stage.json")
-CODE_ROOT = Path("/usr/local/lib/ai-brief-control")
+CODE_ROOT = Path(__file__).resolve().parent
+LEGACY_CODE = Path("/usr/local/lib/ai-brief-control/relay")
 CONTROLLER = CODE_ROOT / "release.py"
 CONTROL_ROOT = Path("/var/lib/ai-brief-control")
 
@@ -130,10 +131,10 @@ def main():
             or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError("unsafe_control_root")
     if config.get("live_enabled"):
-        if config["live"]["control_code"] != str(CODE_ROOT / "relay"):
+        if config["live"]["control_code"] != str(LEGACY_CODE):
             raise ValueError("unexpected_control_code")
         for name in ("runtime.py", "resume.py"):
-            root_owned_file(CODE_ROOT / "relay" / name)
+            root_owned_file(LEGACY_CODE / name)
     fd = os.open(CONTROL_ROOT / "deployment.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

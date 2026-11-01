@@ -40,7 +40,8 @@ class DeploymentRevisionTests(unittest.TestCase):
 
     def test_code_and_deployment_configuration_supersede_old_build(self):
         for relative in ("relay.py", "integrations/slack_wecom/relay.py", "deploy/relay-package.toml",
-                         "deploy/build.lock", ".github/workflows/cd.yml", "LICENSE"):
+                         "deploy/build.lock", "deploy/security-policy.json", "deploy/helpers/defaults.toml",
+                         "deploy/verify.sh", ".github/workflows/cd.yml", "LICENSE"):
             with self.subTest(path=relative):
                 before = self.git("rev-parse", "HEAD")
                 path = self.root / relative
