@@ -15,6 +15,7 @@ dependencies = ["jsonschema==4.26.0"]
 [project.scripts]
 ai-brief = "ai_brief.cli:main"
 ai-brief-relay = "ai_brief_relay.runtime:main"
+ai-brief-notice-check = "ai_brief_relay.notice_check:main"
 ai-brief-control = "ai_brief_control.service:entrypoint"
 
 [tool.setuptools]
