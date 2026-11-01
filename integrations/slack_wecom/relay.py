@@ -25,10 +25,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# /control 与应用 wheel 分开安装；禁止把 wheel 更新误认为控制层已升级。
+if __name__ == "managed_relay" and "article_notice_read_v1" not in globals().get("CONTROL_CAPABILITIES", ()):
+    raise ValueError("administrator_control_upgrade_required")
+
 if __package__:
     from .images import ImageError, MAX_IMAGE_BYTES, image_url, select_images, validate_image
+    from . import notice_format
 else:
     from images import ImageError, MAX_IMAGE_BYTES, image_url, select_images, validate_image
+    import notice_format
+
+NoticeReadError = notice_format.NoticeReadError
 
 TITLE = re.compile(r"^\*{0,2}(?:(?:20\d{2}\s*年\s*)?\d{1,2}\s*月\s*\d{1,2}\s*日\s*)?AI\s+Infra\s+晨报(?=[\s：:*]|$)", re.I)
 TS = re.compile(r"^[0-9]{10,12}\.[0-9]{6}$")
@@ -138,7 +146,7 @@ def notice_url_day(url, profile):
     return match[1]
 
 
-def connector_notice(message, profile, team_id, channel_id):
+def _connector_candidate(message, profile, team_id, channel_id):
     """校验经认证读取的原始历史，仅返回通过校验且移除工具归属的正文。"""
     validate_notice_connector(profile)
     if (not isinstance(message, dict) or message.get("user") != profile["user_id"]
@@ -162,6 +170,14 @@ def connector_notice(message, profile, team_id, channel_id):
             or footer != [{"type": "mrkdwn", "text": profile["attribution_text"], "verbatim": False}]):
         raise RelayError("notice_blocks_rejected")
     elements = sections[0]["elements"]
+    first_text = ""
+    if isinstance(elements, list):
+        for node in elements:
+            if not isinstance(node, dict) or node.get("type") != "text" or not isinstance(node.get("text"), str):
+                break
+            first_text += node["text"]
+    if re.match(r"^AI Infra 晨报 · \d{4}-\d{2}-\d{2}\n\n", first_text):
+        return _article_candidate(message, profile, team_id, elements)
     if (not isinstance(elements, list) or len(elements) not in (2, 3)
             or any(not isinstance(e, dict) or set(e) != {"type", "text"} or e["type"] != "text"
                    or not isinstance(e["text"], str) for e in elements[:-1])):
@@ -202,6 +218,80 @@ def connector_notice(message, profile, team_id, channel_id):
     return {"text": core, "url": url, "images": plans}
 
 
+
+
+def _article_candidate(message, profile, team_id, elements):
+    """先核对精确可见文字与链接节点，再读取发布清单。"""
+    if not isinstance(elements, list) or not 2 <= len(elements) <= 256:
+        raise RelayError("notice_blocks_rejected")
+    core, links, fallback_parts = [], [], []
+    for node in elements:
+        if not isinstance(node, dict):
+            raise RelayError("notice_blocks_rejected")
+        if node.get("type") == "text":
+            if set(node) != {"type", "text"} or not isinstance(node["text"], str):
+                raise RelayError("notice_blocks_rejected")
+            core.append(node["text"])
+            fallback_parts.append([node["text"]])
+        elif node.get("type") == "link":
+            if (set(node) - {"type", "url", "text", "from_llm", "truncated"}
+                    or any(k in node and type(node[k]) is not bool for k in ("from_llm", "truncated"))):
+                raise RelayError("notice_link_rejected")
+            url, label = node.get("url"), node.get("text", node.get("url"))
+            if not isinstance(url, str) or not isinstance(label, str) or label not in {
+                    url, url.rstrip("/"), url.removeprefix("https://"), url.removeprefix("https://").rstrip("/")}:
+                raise RelayError("notice_link_label_rejected")
+            core.append(url)
+            links.append(url)
+            fallback_parts.append([url, "<" + url + ">", "<" + url + "|" + label + ">"])
+        else:
+            raise RelayError("notice_blocks_rejected")
+    text = "".join(core)
+    try:
+        identity = notice_format.parse_article_text(text, profile["report_base_url"])
+        if links != [article["url"] for article in identity["articles"]]:
+            raise ValueError("links_not_visible")
+    except (TypeError, ValueError):
+        raise RelayError("notice_articles_rejected") from None
+    fallback = message.get("text")
+    if not isinstance(fallback, str):
+        raise RelayError("notice_fallback_rejected")
+    fallback = fallback.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    suffix = " " + profile["attribution_text"]
+    if not fallback.endswith(suffix):
+        raise RelayError("notice_fallback_rejected")
+    remaining = fallback[:-len(suffix)]
+    for options in fallback_parts:
+        match = next((value for value in sorted(options, key=len, reverse=True) if remaining.startswith(value)), None)
+        if match is None:
+            raise RelayError("notice_fallback_rejected")
+        remaining = remaining[len(match):]
+    if remaining:
+        raise RelayError("notice_fallback_rejected")
+    files = message.get("files")
+    if (not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict)
+            or files[0].get("user") != profile["user_id"] or files[0].get("user_team") != team_id):
+        raise RelayError("notice_poster_owner_rejected")
+    plans = select_images(message, team_id)
+    if len(plans) != 1 or "error" in plans[0]:
+        raise RelayError("notice_poster_rejected")
+    return {"text": text, "url": identity["index_url"], "articles": identity["articles"],
+            "images": plans, "format": "article_list_v1"}
+
+
+def _bind_notice_manifest(candidate, manifest, profile):
+    if candidate.get("format") == "article_list_v1":
+        try:
+            notice_format.match_manifest(candidate, manifest, profile["report_base_url"])
+        except (TypeError, ValueError, KeyError):
+            raise RelayError("notice_manifest_rejected") from None
+        candidate["images"][0]["expected_sha256"] = manifest["poster"]["sha256"]
+    return candidate
+
+
+def connector_notice(message, profile, team_id, channel_id, *, notice_manifest=None):
+    """纯校验函数：分项通知须提供独立获得的发布清单。"""
+    return _bind_notice_manifest(_connector_candidate(message, profile, team_id, channel_id), notice_manifest, profile)
 
 
 def load_secrets(root):
@@ -328,6 +418,9 @@ class Slack:
                     if len(buffer) > MAX_IMAGE_BYTES or len(buffer) > size:
                         raise ImageError("image_size_rejected")
                 data = bytes(buffer)
+                if len(data) < size:
+                    # 合法响应头后中途 EOF 是未完成读取，不等同于完整内容身份不符。
+                    raise ImageError("image_download_incomplete")
                 if len(data) != size:
                     raise ImageError("image_size_mismatch")
                 validate_image(data, mime)
@@ -601,13 +694,15 @@ class Store:
 
 
 class Relay:
-    def __init__(self, store, slack, wecom, config, clock=time.time, sleeper=time.sleep):
+    def __init__(self, store, slack, wecom, config, clock=time.time, sleeper=time.sleep, notice_reader=None):
         self.store, self.slack, self.wecom, self.config = store, slack, wecom, config
         self.clock, self.sleeper = clock, sleeper
         self.connected = False
         profile = config.get("notice_connector")
         if profile is not None:
             validate_notice_connector(profile)
+        self._notice_cache = {}
+        self.notice_reader = notice_reader if notice_reader is not None else (notice_format.NoticeManifestReader(profile["report_base_url"]) if profile else None)
         if store is not None:
             saved = store.get("notice_connector_v1")
             expected = digest(profile) if profile is not None else None
@@ -621,7 +716,18 @@ class Relay:
         if profile is None or message.get("user") != profile["user_id"]:
             return None
         try:
-            return connector_notice(message, profile, self.config["team_id"], self.config["channel_id"])
+            candidate = _connector_candidate(message, profile, self.config["team_id"], self.config["channel_id"])
+            if candidate.get("format") != "article_list_v1":
+                return candidate
+            key = digest(message)
+            if key not in self._notice_cache:
+                # 读取失败在游标推进及投递写入之前向外传播。
+                manifest = self.notice_reader.read(candidate)
+                verified = _bind_notice_manifest(candidate, manifest, profile)
+                if len(self._notice_cache) >= 16:
+                    self._notice_cache.pop(next(iter(self._notice_cache)))
+                self._notice_cache[key] = verified
+            return self._notice_cache[key]
         except RelayError:
             return None
 
@@ -655,7 +761,8 @@ class Relay:
     def image_plans(self, message):
         if not self.config.get("forward_images", False) or not self.is_brief(message):
             return []
-        return select_images(message, self.config["team_id"])
+        notice = self.notice(message)
+        return notice["images"] if notice else select_images(message, self.config["team_id"])
 
     def poll(self):
         if not self.connected:
@@ -669,11 +776,16 @@ class Relay:
                     raise RelayError("invalid_slack_timestamp", 502)
                 if decimal.Decimal(timestamp) <= decimal.Decimal(self.store.get("cursor")):
                     continue
+                # 缓存只跨同一次处理中的重复校验，不跨投递尝试。
+                self._notice_cache.clear()
                 if self.is_brief(message):
                     self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
                                  self.delivery_text(message), timestamp, "auto", os.getuid(),
                                  image_plans=self.image_plans(message), notice_key=self.notice_key(message))
                 self.store.set("cursor", timestamp)
+        except NoticeReadError:
+            # 公开清单访问故障不能触发重连后跳到最新游标。
+            raise
         except Exception:
             self.connected = False
             raise
@@ -681,6 +793,7 @@ class Relay:
     def dispatch(self, path, payload, uid):
         if uid != os.getuid():
             raise RelayError("forbidden", 403)
+        self._notice_cache.clear()
         if not isinstance(payload, dict):
             raise RelayError("invalid_request")
         if path == "/status":
@@ -730,26 +843,38 @@ class Relay:
             notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")))
             edition = "notice_edition:" + digest([self.config["team_id"], self.config["channel_id"], notice_key])
         db = self.store.db
-        row = db.execute("SELECT intent_hash FROM requests WHERE id=?", (request_id,)).fetchone()
-        if row:
-            if row[0] != digest(intent):
-                raise RelayError("request_id_conflict", 409)
-            return self.store.status(request_id)
-        # 保留旧版可识别的来源键；版次映射与请求原子落盘，回退或编辑均不会丢失时间戳去重。
-        edition_request = self.store.get(edition) if edition else None
-        prior = db.execute("SELECT status FROM requests WHERE source_key=? OR message_ts=? OR id=? ORDER BY created DESC LIMIT 1",
-                           (source, timestamp, edition_request)).fetchone() if source else None
-        status = "sending"
-        if prior and not repeat:
-            status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
-        db.execute("INSERT INTO requests(id,intent_hash,source_key,mode,actor_uid,created,message_ts,status,parts_total,reason_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                   (request_id, digest(intent), source, mode, uid, self.clock(), timestamp, status, len(pieces) + len(image_plans), digest(reason) if reason else None))
-        if edition and (edition_request is None or status == "sending"):
-            db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (edition, request_id))
-        if status == "sending":
-            for index, plan in enumerate(image_plans):
-                db.execute("INSERT INTO image_parts(request_id,file_id,ordinal,status) VALUES (?,?,?,'pending')", (request_id, plan["file_id"], index))
-        db.commit()
+        verified_images = {}
+        # 预检仍属纯读取，但必须与来源准入共享事务锁，避免竞争消费者同时发出。
+        # 超时或进程退出回滚整笔事务，不消费请求、版次或游标；提交后才可外部写入。
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT intent_hash FROM requests WHERE id=?", (request_id,)).fetchone()
+            if row:
+                if row[0] != digest(intent):
+                    raise RelayError("request_id_conflict", 409)
+                return self.store.status(request_id)
+            edition_request = self.store.get(edition) if edition else None
+            prior = db.execute("SELECT status FROM requests WHERE source_key=? OR message_ts=? OR id=? ORDER BY created DESC LIMIT 1",
+                               (source, timestamp, edition_request)).fetchone() if source else None
+            status, preflight_error = "sending", None
+            if prior and not repeat:
+                status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
+            if status == "sending":
+                verified_images, preflight_error = self.prepare_notice_images(image_plans)
+                if preflight_error:
+                    status = "failed"
+            db.execute("INSERT INTO requests(id,intent_hash,source_key,mode,actor_uid,created,message_ts,status,parts_total,reason_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (request_id, digest(intent), source, mode, uid, self.clock(), timestamp, status, len(pieces) + len(image_plans), digest(reason) if reason else None))
+            if edition and (edition_request is None or status in ("sending", "failed")):
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (edition, request_id))
+            if status in ("sending", "failed"):
+                for index, plan in enumerate(image_plans):
+                    image_status, error_code = "pending", None
+                    if preflight_error:
+                        image_status = "failed" if plan["file_id"] == preflight_error[0] else "not_attempted"
+                        error_code = preflight_error[1] if image_status == "failed" else None
+                    db.execute("INSERT INTO image_parts(request_id,file_id,ordinal,status,error_code) VALUES (?,?,?,?,?)",
+                               (request_id, plan["file_id"], index, image_status, error_code))
         if status != "sending":
             return self.store.status(request_id)
         for index, piece in enumerate(pieces):
@@ -773,13 +898,36 @@ class Relay:
                 db.execute("UPDATE image_parts SET status='not_attempted' WHERE request_id=? AND status='pending'", (request_id,))
                 db.commit()
                 return self.store.status(request_id)
-        return self.deliver_images(request_id, image_plans)
+        return self.deliver_images(request_id, image_plans, verified_images)
 
     def wait_slot(self):
         while self.clock() < float(self.store.get("next_send", "0")):
             self.sleeper(min(5, float(self.store.get("next_send")) - self.clock()))
 
-    def deliver_images(self, request_id, plans):
+    def prepare_notice_images(self, plans):
+        # 仅下载与验证，不改账本；调用方在同一准入事务中持锁，随后发送同一份字节。
+        verified = {}
+        for plan in plans:
+            if "expected_sha256" not in plan:
+                continue
+            file_id = plan["file_id"]
+            try:
+                if "error" in plan:
+                    raise ImageError(plan["error"])
+                data = self.slack.download_image(plan)
+                validate_image(data, plan["mime"])
+                if hashlib.sha256(data).hexdigest() != plan["expected_sha256"]:
+                    raise ImageError("notice_poster_hash_mismatch")
+                verified[file_id] = data
+            except ImageError as error:
+                if error.code in {"image_download_failed", "image_download_timed_out", "image_download_incomplete"}:
+                    raise NoticeReadError("notice_poster_read_retry") from None
+                return {}, (file_id, error.code)
+            except Exception:
+                raise NoticeReadError("notice_poster_read_retry") from None
+        return verified, None
+
+    def deliver_images(self, request_id, plans, verified_images=None):
         db, failed = self.store.db, False
         for plan in plans:
             file_id = plan["file_id"]
@@ -788,8 +936,15 @@ class Relay:
                     raise ImageError(plan["error"])
                 db.execute("UPDATE image_parts SET status='downloading' WHERE request_id=? AND file_id=?", (request_id, file_id))
                 db.commit()
-                data = self.slack.download_image(plan)
+                if "expected_sha256" in plan:
+                    if verified_images is None or file_id not in verified_images:
+                        raise ImageError("notice_poster_preflight_required")
+                    data = verified_images[file_id]
+                else:
+                    data = self.slack.download_image(plan)
                 validate_image(data, plan["mime"])
+                if "expected_sha256" in plan and hashlib.sha256(data).hexdigest() != plan["expected_sha256"]:
+                    raise ImageError("notice_poster_hash_mismatch")
             except Exception as error:
                 code = error.code if isinstance(error, ImageError) else "image_download_failed"
                 db.execute("UPDATE image_parts SET status='failed',error_code=? WHERE request_id=? AND file_id=?", (code, request_id, file_id))
@@ -906,6 +1061,9 @@ def serve(root, relay):
             if time.monotonic() >= next_poll:
                 try:
                     relay.poll()
+                except NoticeReadError:
+                    # 尚未发送，保留游标后重试公开清单读取。
+                    print('{"event":"notice_read_retry"}', flush=True)
                 except Exception:
                     # 不记录消息正文、凭据、URL 或原始异常。
                     print('{"event":"poll_paused_until_new_baseline"}', flush=True)

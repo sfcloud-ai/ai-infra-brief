@@ -7,8 +7,11 @@ import json
 import os
 
 
+CONTROL_CAPABILITIES = frozenset({"article_notice_read_v1"})
+
+
 class RetryableReadError(Exception):
-    """仅表示尚未开始投递的历史读取失败，可保留游标稍后重试。"""
+    """仅表示尚未开始投递的只读失败，可保留游标稍后重试。"""
 
 
 
@@ -51,13 +54,19 @@ def resume_class(module):
                 if decimal.Decimal(timestamp) <= decimal.Decimal(self.store.get("cursor")):
                     self.pending_messages.popleft()
                     continue
-                if self.is_brief(message):
-                    text = getattr(self, "delivery_text", module.message_text)(message)
-                    notice_key = getattr(self, "notice_key", lambda value: None)(message)
-                    extra = {"notice_key": notice_key} if notice_key is not None else {}
-                    self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
-                                 text, timestamp, "auto", os.getuid(),
-                                 image_plans=self.image_plans(message), **extra)
+                # 兼容旧应用；新应用的清单缓存仅在本次消息处理内有效。
+                getattr(self, "_notice_cache", {}).clear()
+                try:
+                    if self.is_brief(message):
+                        text = getattr(self, "delivery_text", module.message_text)(message)
+                        notice_key = getattr(self, "notice_key", lambda value: None)(message)
+                        extra = {"notice_key": notice_key} if notice_key is not None else {}
+                        self.deliver("auto:" + timestamp, {"mode": "auto", "ts": timestamp},
+                                     text, timestamp, "auto", os.getuid(),
+                                     image_plans=self.image_plans(message), **extra)
+                except getattr(module, "NoticeReadError", ()):
+                    # 尚未开始投递；保留当前消息与游标，稍后重试读取。
+                    raise RetryableReadError("notice_read_retry") from None
                 self.store.set("cursor", timestamp)
                 self.pending_messages.popleft()
                 return True

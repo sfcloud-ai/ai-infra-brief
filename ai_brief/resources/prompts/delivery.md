@@ -1,14 +1,26 @@
-# 晨报图文投递契约 v2
+# 晨报图文投递契约 v3
 
-长期格式只有三项：**本期子标题、当天 Pages 索引 URL、一张信息海报**。海报承载精简文字说明或架构说明；完整机制、实验条件、限制、来源和详细图解回到报告站阅读。此契约不授予发送、建仓库、改定时任务、部署或扩权的权限。
+长期文字格式为**本期每篇子文章的子标题及对应 Pages URL**，同一条顶层消息附**一张横版分区总海报**。不是整期一个主题标题，也不是逐篇另发多张图片。文字不另加各篇摘要；海报分区承载各篇的精简文字说明或架构说明；完整机制、实验条件、限制、来源和详细图解回到报告站阅读。此契约不授予发送、建仓库、改定时任务、部署或扩权的权限。
 
 ## 顶层图文消息
 
-首行使用 `AI Infra 晨报 · YYYY-MM-DD · 本期子标题`，下一段只放已核验的当天 Pages 索引 URL，同一条顶层消息直接附一张 Slack 托管 PNG/JPEG 海报。原机器人路径使用 `file_share`；已启用并固定身份的 `notice_connector` 路径允许实际 history 不含 subtype，或为 `file_share`，不得补造字段。固定前缀保持 relay 可识别，不另写长导读，不把完整报告塞进消息。发布工具须关闭链接/媒体 unfurl，不添加 section accessory 或额外 attachments；实际读取出现这些附加可见内容时拒绝验收。`晨报` 后保留空格；旧的 `AI Infra 晨报｜10 月 31 日` 不满足当前标题正则。
+首行使用 `AI Infra 晨报 · YYYY-MM-DD` 保留机器识别标识；空行后按 `report.json` 的 `articles` 原顺序列出每篇子标题，下一行只放该篇已核验的完整 URL，各篇间空一行。无编号、无 Markdown 列表标记，不追加摘要段。例：
 
-文字经实际 relay 渲染后不超过 1,900 UTF-8 字节，使标题与完整 URL 保持在一片中。过长应精简子标题或采用已核验的规范路径，不截断 URL，不设计跨消息长文重组，不擅用第三方短链。
+```text
+AI Infra 晨报 · YYYY-MM-DD
 
-报告站使用独立仓库，每天是独立索引区块，列出本期子文章和摘要；各主题有稳定路径，全文搜索定位到子文章及章节。引擎动态按真实内容组织，不为了栏目制造空文章。消息可链接当天索引，再进入具体子文章。报告、子文章、图片与去重索引对应同一获准版本。
+第一篇子标题
+https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/rN/first-article/
+
+第二篇子标题
+https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/rN/second-article/
+```
+
+同一条顶层消息直接附一张 Slack 托管 PNG/JPEG 海报。原机器人路径使用 `file_share`；固定身份的 `notice_connector` 路径允许实际 history 不含 subtype，或为 `file_share`，不得补造字段。发布工具关闭链接/媒体 unfurl，不添加 section accessory 或额外 attachments。实际读取必须证实子标题、链接与原生附件可见，离线模板不能替代真实连接器结构验证。
+
+文字经实际 relay 渲染后不超过 1,900 UTF-8 字节，使全部子标题与完整 URL 保持在一片中。过长应在发布前精简同一 report.json 中的标题，不截断 URL，不设计跨消息长文重组，不擅用第三方短链。
+
+报告站使用独立仓库，每天是独立索引区块，列出本期子文章和摘要；各主题有稳定路径，全文搜索定位到子文章及章节。引擎动态按真实内容组织，不为了栏目制造空文章。消息直接链接每篇子文章；当天索引根 URL 从同一期文章链接推导并用作版次去重，不必额外占用消息文字。报告、子文章、图片与去重索引对应同一获准版本。
 
 ## 发布先于通知
 
@@ -19,7 +31,7 @@
 
 ## 海报承载信息
 
-海报用少量可读文字概括关键机制、判断或架构关系，不是装饰图。保留影响判断的条件；不同模型独立权重。没有可靠数值时画结构说明，不编造性能柱状图。完整证据和限制放在对应子文章，海报与站内报告版本一致。
+一张横版总海报按本期子文章分区，用少量可读文字概括关键机制、判断或架构关系，不是装饰图。不把密集技术笔记拼成长图，不用绿色整页底色。保留影响判断的条件；不同模型独立权重。没有可靠数值时画结构说明，不编造性能柱状图。完整证据和限制放在对应子文章，海报与站内报告版本一致。
 
 只接受消息自身 `files` 中的一张 PNG/JPEG，最多 2,000,000 字节，满足实际 `images.validate_file` 对 MIME、filetype、工作区、文件 ID、访问模式和可信下载地址的校验。SVG 须先栅格化并检查移动端可读性。网页预览、文件链接、Block Kit image、线程图片、无合格标题的独立图或后补附件不能替代原生海报。
 
@@ -28,8 +40,9 @@
 ## 校验、回执与去重
 
 - Slack：从已认证工作区和固定目的地读取消息，核对 sender、顶层、未编辑、规范标题、完整 URL 和单张附件 ID。支持的 blocks 必须包含相同可见正文；fallback 有 URL 而 blocks 仅有摘要或不可验证控件时，不能宣称可见内容合格。
-- `prepare_notice_preview` 只生成离线模板，`delivery_allowed=false`、`publication_status=not_checked`。它不访问 Pages、不上传图片，也不是 Slack API 参数。`check_received_notice` 使用真实 relay 的解析、过滤、分片及图片选择函数核对读取结果；必须提供实际认证得到的 `read_context={channel_id, team_id}`。原始 history 可以没有逐条 channel/team，但已有字段必须一致。
-- 使用连接器时，向 `check_received_notice` 传入与部署状态一致的 `notice_connector`：精确用户、App、工具归属、报告站根 URL 和启用截止游标。实际用户、App、无 bot_id、未编辑顶层消息、可见正文与回退文字、归属块、版次 URL 及单张附件所有者均须通过校验。工具自动加入归属，调用方不手动补写。只有通过全部校验才从企微正文移除工具归属。配置和结构细节见 `integrations/slack_wecom/NOTICE_CONNECTOR.md`；未启用该配置不能假定连接器消息会被转发。
+- `prepare_article_notice_preview` 从精确的 report.json 字节、发布 commit 与海报元数据生成离线模板和预期通知清单；旧 `prepare_notice_preview` 只为历史 v2 兼容保留，不再用于新报。离线模板始终为`delivery_allowed=false`、`publication_status=not_checked`。它不访问 Pages、不上传图片，也不是 Slack API 参数。`check_received_notice` 使用真实 relay 的解析、过滤、分片及图片选择函数核对读取结果；必须提供实际认证得到的 `read_context={channel_id, team_id}`。原始 history 可以没有逐条 channel/team，但已有字段必须一致。
+- 使用连接器时，向 `check_received_notice` 传入与部署状态一致的 `notice_connector`：精确用户、App、工具归属、报告站根 URL 和启用截止游标。实际用户、App、无 bot_id、未编辑顶层消息、可见正文与回退文字、归属块、同一期全部文章 URL 及单张附件所有者均须通过校验。分项标题、顺序、数量及 URL 逐项匹配同源构建的 notice.json，不仅检查域名。工具自动加入归属，调用方不手动补写。只有通过全部校验才从企微正文移除工具归属。配置和结构细节见 `integrations/slack_wecom/NOTICE_CONNECTOR.md`；未启用该配置不能假定连接器消息会被转发。
+- 报告站从同一 report.json 生成 `/reports/YYYY-MM-DD/rN/notice.json`，绑定正文、文章清单、原报告和海报 SHA256、构建 commit。转发器只读配置中固定的报告站，禁止重定向且不携带 Slack 凭据，前后读取 publication.json 核对 commit；访问失败保留消息和游标，不能当成非法消息跳过。清单读取设总期限，未知写入仍禁止自动重发。
 - 校验返回真实 Slack ts 与 `auto:<ts>`，始终保留 `wecom_status=not_checked`、`publication_status=not_checked`。标题匹配、附件元数据通过、离线假传输成功均不代表企微送达或网页可访问。
 - 企微：已有权限的执行者核对对应 relay 请求的文字和图片状态，文字 `parts_sent == parts_total`、海报为 `sent`；再在获准目的地检查可见内容、顺序和图中文字。缺回执、`partial`、`failed`、`unknown` 均不算完整成功。
 - 通知账本关联报告版本、发布 commit、Pages URL、海报摘要、目的地与真实 Slack ts。已配置连接器按版次 URL 与源时间戳同时去重，同一版次换 ts 或附件 ID 也不会自动重发；新 `rN` 是独立版次。原机器人路径仍按源消息去重。未知结果先核对已有回执，不自动重发、补发历史，不靠编辑旧消息期待补转发。
@@ -39,3 +52,5 @@
 云端任务读取同一 commit 的研究、编辑及本契约；本地应用的演练仍是 mock runner；Slack 发布工具、relay、报告仓库机器人和 Pages 发布是独立步骤。更新契约不会自行修改定时任务、生产服务或权限，也不把离线模板接成真实发布器。真实 Slack→企微联调须在明确授权的测试范围进行。
 
 回归采用合成消息、合成图片和假传输，验证标题、blocks、URL、精确身份、图片计划、版次与源消息去重。报告站和机器人在独立报告仓库接入。relay 继续使用原 SQLite 账本并保存独立连接器身份摘要与版次映射；原时间戳来源键兼容旧版。启用时保留游标与历史，不重置投递状态。
+
+分项通知海报采用原字节契约：上传前核对本地实际字节的 SHA256 与已发布 manifest 一致，并使用已验证不会改写字节的原生上传路径。正式生产路径未经实测不能宣称支持；不得以像素相同替代字节摘要。读回后必须下载该实际 file ID 的原图字节并传给 `check_received_notice`，不符则停止并核对，不能换 file ID 重发。企微转发器必须在任何文字发送前先验证海报，复用同一份已验字节；partial/unknown 不得报成功。

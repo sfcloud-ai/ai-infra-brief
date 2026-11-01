@@ -17,8 +17,10 @@ import time
 from types import SimpleNamespace
 
 if __package__:
+    from . import resume as resume_adapter
     from .resume import RetryableReadError, assert_reconciled, binding, resume_class
 else:
+    import resume as resume_adapter
     from resume import RetryableReadError, assert_reconciled, binding, resume_class
 
 
@@ -36,9 +38,18 @@ def load_module(code=None):
     sys.path.insert(0, str(directory))
     spec = importlib.util.spec_from_file_location("managed_relay", directory / "relay.py")
     module = importlib.util.module_from_spec(spec)
+    # 固定控制层主动传入能力；旧控制层不会设置，新应用在预检时拒绝。
+    module.CONTROL_CAPABILITIES = getattr(resume_adapter, "CONTROL_CAPABILITIES", frozenset())
     spec.loader.exec_module(module)
-    if Path(sys.modules["images"].__file__).resolve() != directory / "images.py":
-        raise ValueError("unexpected_image_module")
+    for name in ("images", "notice_format"):
+        imported = getattr(module, name, None) if name == "notice_format" else sys.modules.get(name)
+        if imported is None and name == "notice_format":
+            # 历史 release 与 /legacy 只包含 images，不强迫它们依赖新模块。
+            continue
+        path = directory / (name + ".py")
+        if (imported is None or path.is_symlink() or not path.is_file()
+                or Path(imported.__file__).resolve() != path):
+            raise ValueError("unexpected_runtime_module")
     return module
 
 
@@ -242,8 +253,9 @@ def serve(module, root, release, activation_file=None):
                         if not stopping and controller.phase == "active" and time.monotonic() >= next_poll:
                             try:
                                 processed = controller.poll()
-                            except RetryableReadError:
-                                print('{"event":"history_read_retry"}', flush=True)
+                            except RetryableReadError as error:
+                                event = "notice_read_retry" if str(error) == "notice_read_retry" else "history_read_retry"
+                                print(json.dumps({"event": event}), flush=True)
                                 next_poll = time.monotonic() + min(config["poll_seconds"], 30)
                             except Exception:
                                 controller.phase = "paused"
