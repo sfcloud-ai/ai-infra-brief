@@ -23,12 +23,16 @@
 
 由管理员安装固定控制层和专用部署账户：
 
-1. 将 `stage_helper.py`、`ssh_entry.py`、`release.py`、`policy.py`、`supervisor.py` 与受控 `relay/runtime.py`、`relay/resume.py` 安装为 root 所有的文件。
+1. 将 `stage_helper.py`、`ssh_entry.py`、`release.py`、`policy.py`、`supervisor.py`、`notice_service.py` 与历史兼容用的 `relay/runtime.py`、`relay/resume.py` 安装为 root 所有的文件。
 2. 为部署账户配置 forced-command SSH 公钥和仅允许固定 helper 的 sudo 规则；禁用任意 shell、PTY 和端口转发，不授予通用 sudo 或 Docker 组权限。
 3. 建立 `/opt/ai-infra-brief-prototype` 和 root 私有的 `/var/lib/ai-brief-control`，在 root 所有的 `/etc/ai-brief-stage.json` 中指定核实过的路径、运行 UID/GID 和 Python 3.12 镜像摘要。
 4. 初始设置 `live_enabled=false`、`bootstrap_approved=false`。在维护窗口核对旧服务与账本，完成单实例交接，设置运行开关并启用自动发布。
 
-固定控制层不随应用 CD 更新；修改控制层需要单独审查并由管理员安装。分项通知还要求一并升级固定的 `runtime.py` 和 `resume.py`：新版适配器提供 `article_notice_read_v1` 能力，覆盖清单临时读取失败重试与逐消息缓存清理；只升级 wheel 不够。新应用被旧控制层加载时，在无凭据的 `capabilities` 预检阶段拒绝，不能先停旧实例再尝试。新版 loader 只检查应用实际导入的清单模块，保留不含 `notice_format.py` 的旧 release 和 `/legacy` 的预检、交接、暂停与回滚能力。不要删除旧 release、游标或账本来跨过门禁。应用在非 root 容器运行，代码和配置只读，只有 `state`、`run` 可写。部署账户不能直接读取转发凭据或修改受保护的发布目录。
+固定的特权部署入口仍由管理员审查和安装。应用 `runtime.py`、`resume.py` 则从对应 release 的 wheel 运行：预检、交接、控制请求、启动和回滚始终选取同一版本，不再要求每次手工复制运行时。历史 `/legacy` 仍使用固定兼容层。不要删除旧 release、游标或账本来跨过门禁。应用在非 root 容器运行，代码和配置只读，只有 `state`、`run` 可写。部署账户不能直接读取转发凭据或修改受保护的发布目录。
+
+启用独立校验器的联动 CD 时，先安装 `notice_service.py` 到固定控制层，并用同一模块提供校验器 systemd 单元的 `start`、`stop` 入口。root 所有的 `/etc/ai-brief-notice-check.json` 固定 `root`、`relay_root`、`ipc`、`image`、`uid`、`gid`、`publisher_uid` 和 `name`；保留原账号、只读凭据挂载及内核对端身份检查。`/opt/ai-brief-notice-check/release.json` 仅记录已安装的 `release` SHA。完成首次交接后，在现有部署配置的 `live` 中设置 `notice_service: true`。
+
+校验器候选首先在无网络、无凭据容器里预检。转发器健康后，固定入口确认旧校验器退出，再切换版本记录并启动同版校验器；校验内核对端身份和容器隔离后才确认整个发布。失败由同一 Supervisor 恢复旧应用和旧校验器，始终不回写账本。启用联动后，回滚目标也必须保留可运行的校验器模块；不支持该模块的历史包会在停止现役服务前被拒绝。首次安装不能仅靠合入代码代替。
 
 启用转发器独立发布包前，由管理员一并更新固定控制层。受限 `status` 必须返回 `receiver_format: relay-only-v1`，该标识由已安装的接收器提供。Actions 在上传前检查此能力；旧接收器会返回 `administrator_receiver_upgrade_required`，不接收新包。
 

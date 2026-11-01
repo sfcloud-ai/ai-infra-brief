@@ -12,8 +12,10 @@ import uuid
 
 if __package__:
     from .release import write_json
+    from . import notice_service
 else:
     from release import write_json
+    import notice_service
 
 
 class ServiceError(Exception):
@@ -88,7 +90,8 @@ class DockerDriver:
         self.config, self.control = config, Path(control_root)
         required = {"container", "legacy_container", "relay_root", "control_code", "legacy_relay", "legacy_images"}
         live = config["live"]
-        if set(live) != required:
+        if (not required <= set(live) or set(live) - required - {"notice_service"}
+                or type(live.get("notice_service", False)) is not bool):
             raise ServiceError("invalid_live_configuration")
         for name in ("container", "legacy_container"):
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,80}", live[name]):
@@ -166,12 +169,17 @@ class DockerDriver:
             return "/legacy"
         return "/prototype/releases/" + release + "/venv/lib/python3.12/site-packages/ai_brief_relay"
 
-    def one_shot(self, arguments, readonly_state=False):
+    def runtime(self, release):
+        # 应用运行时与恢复逻辑随同一 release 回滚；只有历史散装程序使用固定兼容层。
+        code = self.code(release)
+        return "/control/runtime.py" if code == "/legacy" else code + "/runtime.py"
+
+    def one_shot(self, arguments, readonly_state=False, runtime="/control/runtime.py"):
         name = "ai-brief-check-" + uuid.uuid4().hex
         try:
             return self.command(["run", "--rm", "--pull", "never", "--name", name, "--network", "none"]
                                 + self.common(readonly_state) + [self.config["image"], "python",
-                                "/control/runtime.py"] + arguments, timeout=90)
+                                runtime] + arguments, timeout=90)
         finally:
             self.command(["rm", "-f", name], optional=True, timeout=15)
 
@@ -182,9 +190,12 @@ class DockerDriver:
             if (not ready.is_file() or ready.is_symlink()
                     or json.loads(ready.read_text()).get("commit") != release):
                 raise ServiceError("release_not_retained_or_ready")
-        result = self.one_shot(["capabilities", "--code", code], readonly_state=True)
+        result = self.one_shot(["capabilities", "--code", code], readonly_state=True,
+                               runtime=self.runtime(release))
         if json.loads(result.stdout) != {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0}:
             raise ServiceError("release_capabilities_failed")
+        if self.live.get("notice_service"):
+            notice_service.preflight(release)
 
     def common(self, readonly_state=False):
         uid = str(self.config["uid"])
@@ -237,7 +248,7 @@ class DockerDriver:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ServiceError("control_deadline")
-        arguments = ["exec", self.live["container"], "python", "/control/runtime.py", "control",
+        arguments = ["exec", self.live["container"], "python", self.runtime(release), "control",
                      "--root", "/relay", "--code", self.code(release), "--release", release,
                      "--operation", operation, "--deadline", repr(deadline)]
         if nonce is not None:
@@ -264,6 +275,8 @@ class DockerDriver:
 
     def wait_healthy(self, release):
         self.wait(release, active=True)
+        if self.live.get("notice_service"):
+            notice_service.switch(release)
         write_json(self.activation / "active.json", {"release": release})
         os.chmod(self.activation / "active.json", 0o444)
         self.revoke_permit()
@@ -281,7 +294,8 @@ class DockerDriver:
             raise ServiceError("relay_activation_failed")
 
     def handoff(self, release):
-        self.one_shot(["handoff", "--root", "/relay", "--code", self.code(release)])
+        self.one_shot(["handoff", "--root", "/relay", "--code", self.code(release)],
+                      runtime=self.runtime(release))
 
     def abort_start(self, release, before):
         # 成功查询完整容器清单后才能认定不存在；daemon 或 inspect 失败不能当作已停止。
@@ -363,6 +377,6 @@ class DockerDriver:
         self.command(["run", "-d", "--pull", "never", "--name", self.live["container"],
                       "--label", "sfcloud.ai.service=ai-infra-brief", "--label", "sfcloud.ai.release=" + release,
                       "--restart", "unless-stopped", "--network", "bridge"] + self.common()
-                     + [self.config["image"], "python", "/control/runtime.py", "serve", "--root", "/relay",
+                     + [self.config["image"], "python", self.runtime(release), "serve", "--root", "/relay",
                         "--code", self.code(release), "--release", release,
                         "--activation-file", "/activation/active.json"])

@@ -114,7 +114,8 @@ def main():
     if os.getuid() != 0:
         raise ValueError("restricted_helper_only")
     command = parse_command(" ".join(sys.argv[1:]))
-    for path in (CONFIG, CONTROLLER, CODE_ROOT / "policy.py", CODE_ROOT / "supervisor.py", CODE_ROOT / "ssh_entry.py"):
+    for path in (CONFIG, CONTROLLER, CODE_ROOT / "policy.py", CODE_ROOT / "supervisor.py",
+                 CODE_ROOT / "notice_service.py", CODE_ROOT / "ssh_entry.py"):
         root_owned_file(path)
     config = json.loads(CONFIG.read_text())
     # 即使是 status/rollback，也验证固定配置，不能让未验证路径进入 Docker。
