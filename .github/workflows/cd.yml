@@ -5,8 +5,7 @@ on:
     branches: [main]
     paths:
       - '**/*.py'
-      - 'deploy/*.toml'
-      - 'deploy/*.lock'
+      - 'deploy/**'
       - '.github/workflows/cd.yml'
       - '.github/workflows/rollback.yml'
       - 'requirements*.lock'

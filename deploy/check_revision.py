@@ -6,7 +6,7 @@ import sys
 
 
 DEPLOY_PATHS = (
-    ":(glob)**/*.py", ":(glob)deploy/*.toml", ":(glob)deploy/*.lock",
+    ":(glob)**/*.py", "deploy/",
     ".github/workflows/cd.yml", ".github/workflows/rollback.yml",
     ":(glob)requirements*.lock", "pyproject.toml", "LICENSE",
 )
