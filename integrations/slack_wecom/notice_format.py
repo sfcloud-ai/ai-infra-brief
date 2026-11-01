@@ -1,6 +1,7 @@
 """有界的分项通知数据格式与固定来源发布清单读取。"""
 from datetime import date
 from contextlib import contextmanager
+import base64
 import hashlib
 import json
 import re
@@ -12,6 +13,8 @@ import urllib.request
 
 MAX_NOTICE_BYTES = 1900
 MAX_MANIFEST_BYTES = 32768
+MAX_BUNDLE_BYTES = 8 * 1024 * 1024
+BUNDLE_FILENAME = "ai-brief-bundle.json"
 SHA = re.compile(r"^[a-f0-9]{40}$")
 HASH = re.compile(r"^[a-f0-9]{64}$")
 ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
@@ -135,6 +138,71 @@ def match_manifest(candidate, manifest, base):
     require(candidate["text"] == manifest["text"] and candidate["url"] == manifest["index_url"]
             and candidate["articles"] == manifest["articles"])
     return manifest
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result)
+        result[key] = value
+    return result
+
+
+def bundle_poster(data, manifest, base):
+    """解码原始报告包，并绑定独立读取的 Pages 元数据。
+
+    禁止转换图片或降级；来源标记仍参与已发布海报的精确哈希，
+    此处不验证 C2PA 签名的密码学真实性。
+    """
+    validate_manifest(manifest, base)
+    require(isinstance(data, bytes) and 0 < len(data) <= MAX_BUNDLE_BYTES)
+    value = json.loads(data.decode("utf-8"), object_pairs_hook=_unique_object)
+    exact(value, ["schema_version", "request_id", "repository", "expected_base_sha", "prompt_commit_sha", "files"])
+    require(value["schema_version"] == "1.0" and value["repository"] == "sfcloud-ai/ai-infra-reports"
+            and isinstance(value["request_id"], str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", value["request_id"])
+            and all(isinstance(value[k], str) and SHA.fullmatch(value[k]) for k in ("expected_base_sha", "prompt_commit_sha")))
+    require(isinstance(value["files"], list) and 0 < len(value["files"]) <= 64)
+    root = f"reports/{manifest['date']}/r{manifest['revision']}/"
+    files, total = {}, 0
+    for item in value["files"]:
+        exact(item, ["path", "sha256", "base64"])
+        path = item["path"]
+        require(isinstance(path, str) and re.fullmatch(re.escape(root) + r"(report\.json|articles/[a-z0-9][a-z0-9-]{0,79}\.md|assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg))", path)
+                and path not in files and isinstance(item["sha256"], str) and HASH.fullmatch(item["sha256"])
+                and isinstance(item["base64"], str))
+        raw = base64.b64decode(item["base64"], validate=True)
+        require(raw and base64.b64encode(raw).decode("ascii") == item["base64"]
+                and hashlib.sha256(raw).hexdigest() == item["sha256"])
+        total += len(raw)
+        require(total <= 6 * 1024 * 1024)
+        files[path] = raw
+    metadata = files.get(root + "report.json")
+    require(metadata is not None and len(metadata) < 128 * 1024
+            and hashlib.sha256(metadata).hexdigest() == manifest["report_sha256"])
+    report = json.loads(metadata.decode("utf-8"), object_pairs_hook=_unique_object)
+    exact(report, ["schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"])
+    require(report["schema_version"] == "1.0" and report["date"] == manifest["date"]
+            and type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"]
+            and isinstance(report["images"], list) and len(report["images"]) <= 20
+            and build_manifest({**report, "revision": manifest["revision"]}, base,
+                               manifest["report_sha256"], manifest["commit"]) == manifest)
+    used = {root + "report.json"}
+    for article in report["articles"]:
+        path = root + "articles/" + article["id"] + ".md"
+        require(path not in used and path in files and len(files[path]) <= 256 * 1024
+                and hashlib.sha256(files[path]).hexdigest() == article.get("sha256"))
+        used.add(path)
+    for asset in report["images"]:
+        require(isinstance(asset, dict) and isinstance(asset.get("path"), str))
+        path = root + asset["path"]
+        require(re.fullmatch(r"assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg)", asset["path"])
+                and path not in used and path in files and len(files[path]) <= 2 * 1024 * 1024
+                and hashlib.sha256(files[path]).hexdigest() == asset.get("sha256"))
+        used.add(path)
+    require(set(files) == used and root + report["poster"] in files)
+    poster = files[root + report["poster"]]
+    require(len(poster) <= 2_000_000 and hashlib.sha256(poster).hexdigest() == manifest["poster"]["sha256"])
+    return poster
 
 
 @contextmanager

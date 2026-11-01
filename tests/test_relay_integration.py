@@ -86,7 +86,7 @@ class RelayIntegrationTests(unittest.TestCase):
 
     def test_original_and_connector_tests_run_with_outbound_guard(self):
         result = self.checked_runner()
-        self.assertEqual(result["tests_run"], 122)  # 原有 114 项及本机校验入口 8 项。
+        self.assertEqual(result["tests_run"], 135)  # 原有 122 项及报告包原图传输 13 项。
         self.assertEqual(result["outbound_attempts"], 0)
         if result["skipped"]:
             self.assertEqual(result["skipped"], 1)

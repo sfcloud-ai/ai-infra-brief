@@ -23,10 +23,15 @@ def read_request(data, config):
     if not isinstance(data, bytes) or not 0 < len(data) <= relay.MAX_BODY:
         raise NoticeCheckError("Bounded notice check request required")
     request = json.loads(data.decode("utf-8"))
-    if (not isinstance(request, dict) or set(request) != {"message_ts", "file_id", "notice_manifest"}
+    fields = {"message_ts", "file_id", "notice_manifest"}
+    if (not isinstance(request, dict) or set(request) not in (fields, fields | {"transport", "bundle_sha256", "bundle_bytes"})
             or not isinstance(request["message_ts"], str) or not relay.TS.fullmatch(request["message_ts"])
             or not isinstance(request["file_id"], str) or not re.fullmatch(r"F[A-Z0-9]+", request["file_id"])):
         raise NoticeCheckError("Exact message, file and expected notice manifest required")
+    if "transport" in request and (request["transport"] != "report_bundle_v1"
+            or not isinstance(request["bundle_sha256"], str) or not notice_format.HASH.fullmatch(request["bundle_sha256"])
+            or type(request["bundle_bytes"]) is not int or not 0 < request["bundle_bytes"] <= notice_format.MAX_BUNDLE_BYTES):
+        raise NoticeCheckError("Exact bundle transport digest and length required")
     profile = config.get("notice_connector")
     relay.validate_notice_connector(profile)
     if (config.get("forward_images") is not True or profile["user_id"] != config.get("user_id")
@@ -68,13 +73,26 @@ def read_received_notice(data, config, slack, *, notice_reader=None):
     content = lambda value: {k: v for k, v in value.items() if k != "commit"}
     if content(published) != content(manifest):
         raise NoticeCheckError("Published notice content differs from expected edition")
-    poster = slack.download_image(notice["images"][0])
+    image = notice["images"][0]
+    if request.get("transport") != image.get("transport"):
+        raise NoticeCheckError("Observed transport differs from reservation")
+    transport = None
+    if request.get("transport") == "report_bundle_v1":
+        transport = slack.download_bundle(image)
+        if (not isinstance(transport, bytes) or len(transport) != request["bundle_bytes"]
+                or hashlib.sha256(transport).hexdigest() != request["bundle_sha256"]):
+            raise NoticeCheckError("Actual bundle differs from reserved source")
+        poster = relay.original_bundle_poster(transport, image)
+    else:
+        poster = slack.download_image(image)
     plan = {"notice_manifest": manifest,
             "event_template": {"text": manifest["text"], "files": [{"id": request["file_id"]}]}}
+    if transport is not None:
+        plan.update({k: request[k] for k in ("transport", "bundle_sha256", "bundle_bytes")})
     result = check_received_notice(plan, message, channel_id=config["channel_id"],
                                    sender_id=profile["user_id"], team_id=config["team_id"],
                                    read_context={"channel_id": config["channel_id"], "team_id": config["team_id"]},
-                                   notice_connector=profile, actual_poster_bytes=poster)
+                                   notice_connector=profile, actual_poster_bytes=poster, actual_transport_bytes=transport)
     if exact_message(slack, request["message_ts"]) != message or reader.read(notice) != published:
         raise NoticeCheckError("Notice or publication changed during verification")
     return {**result, "observed_publication_commit": published["commit"],
@@ -100,7 +118,7 @@ def main(argv=None):
     return 0
 
 
-def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read_context, notice_connector=None, actual_poster_bytes=None):
+def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read_context, notice_connector=None, actual_poster_bytes=None, actual_transport_bytes=None):
     """核对实际读取的 Slack 顶层图文；不把匹配规则当作企微送达回执。"""
     if __package__:
         from . import relay
@@ -121,12 +139,24 @@ def check_received_notice(plan, message, *, channel_id, sender_id, team_id, read
             return {}
         try:
             expected = plan["notice_manifest"]["poster"]["sha256"]
-            if not isinstance(actual_poster_bytes, bytes) or len(actual_poster_bytes) != image["size"]:
+            bundled = image.get("transport") == "report_bundle_v1"
+            if plan.get("transport") != image.get("transport"):
+                raise relay.ImageError("notice_transport_mismatch")
+            if not isinstance(actual_poster_bytes, bytes) or (not bundled and len(actual_poster_bytes) != image["size"]):
                 raise relay.ImageError("notice_poster_bytes_required")
             relay.validate_image(actual_poster_bytes, image["mime"])
             actual_hash = hashlib.sha256(actual_poster_bytes).hexdigest()
             if actual_hash != expected:
                 raise relay.ImageError("notice_poster_hash_mismatch")
+            if bundled:
+                if (not isinstance(actual_transport_bytes, bytes) or len(actual_transport_bytes) != image["size"]
+                        or len(actual_transport_bytes) != plan["bundle_bytes"]
+                        or hashlib.sha256(actual_transport_bytes).hexdigest() != plan["bundle_sha256"]
+                        or relay.original_bundle_poster(actual_transport_bytes, image) != actual_poster_bytes):
+                    raise relay.ImageError("notice_bundle_hash_mismatch")
+                return {"file_id": image["file_id"], "transport_sha256": plan["bundle_sha256"],
+                        "transport_bytes": len(actual_transport_bytes), "poster_sha256": actual_hash,
+                        "poster_bytes": len(actual_poster_bytes)}
         except (relay.ImageError, KeyError, TypeError) as error:
             raise NoticeCheckError("Actual Slack poster must exactly match published source bytes") from error
         return {"file_id": image["file_id"], "transport_sha256": actual_hash,
