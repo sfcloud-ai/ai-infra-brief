@@ -81,3 +81,8 @@ def assert_reconciled(store):
         count = store.db.execute("SELECT COUNT(*) FROM " + table + " WHERE status IN ('sending','unknown')").fetchone()[0]
         if count:
             raise ValueError("unreconciled_delivery_blocks_cutover")
+    # 旧版运行时无法保留未完成的定时图片分片，因此不得带着排队任务切换版本。
+    # 重启时关闭调度配置也必须遵守这条排空约束。
+    if store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_notices'").fetchone():
+        if store.db.execute("SELECT 1 FROM scheduled_notices WHERE phase!='complete' LIMIT 1").fetchone():
+            raise ValueError("unfinished_scheduled_delivery_blocks_cutover")

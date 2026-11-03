@@ -9,7 +9,9 @@ import sys
 import tempfile
 
 
-RUNTIME_FILES = ("__init__.py", "relay.py", "images.py", "notice_format.py", "notice_check.py", "notice_client.py", "notice_socket.py", "resume.py", "runtime.py")
+RUNTIME_FILES = ("__init__.py", "relay.py", "images.py", "notice_format.py", "notice_check.py", "notice_client.py", "notice_socket.py", "resume.py", "runtime.py",
+                 "scheduled_delivery.py", "scheduled_socket.py", "scheduled_verifier.py",
+                 "scheduled_runtime.py", "scheduled_client.py")
 
 
 def build_relay(source, output):

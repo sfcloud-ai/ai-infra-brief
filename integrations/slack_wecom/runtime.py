@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import signal
 import shutil
 import socketserver
@@ -114,15 +115,22 @@ def check_state(module, root):
 
 
 class ControlledRelay:
-    def __init__(self, module, receiver, release, activation_file=None):
+    def __init__(self, module, receiver, release, activation_file=None, scheduled=None):
         self.activation_file = activation_file
+        self.scheduled = scheduled
         self.revoked_nonce = None
         self.module, self.receiver, self.release = module, receiver, release
         self.phase = "paused"
         self.polls = 0
 
+    def reconciled(self):
+        if self.scheduled is None:
+            assert_reconciled(self.receiver.store)
+        else:
+            self.scheduled.assert_reconciled()
+
     def ready(self):
-        assert_reconciled(self.receiver.store)
+        self.reconciled()
         self.receiver.slack.newer(self.receiver.store.get("cursor"))
 
     def deadline(self, payload):
@@ -174,6 +182,8 @@ class ControlledRelay:
                 raise self.module.RelayError("not_found", 404)
             # 同一线程执行请求和 poll，此响应说明当前没有正在执行的投递调用。
             try:
+                # 部署排空仍要求每一份回执都已对账。
+                # 定时路径的例外只允许独立任务继续，并不授权版本切换。
                 assert_reconciled(self.receiver.store)
                 reconciled = True
             except ValueError:
@@ -185,21 +195,21 @@ class ControlledRelay:
         if path == "/status":
             return self.receiver.dispatch(path, payload, uid)
         try:
-            assert_reconciled(self.receiver.store)
+            self.reconciled()
             return self.receiver.dispatch(path, payload, uid)
         finally:
             # 手动投递也共享账本；未知回执不能等到下一次轮询才阻断发送。
             try:
-                assert_reconciled(self.receiver.store)
+                self.reconciled()
             except Exception:
                 self.phase = "paused"
 
     def poll(self):
         if self.phase == "active":
             try:
-                assert_reconciled(self.receiver.store)
+                self.reconciled()
                 processed = self.receiver.poll()
-                assert_reconciled(self.receiver.store)
+                self.reconciled()
                 self.polls += 1
                 return processed
             except RetryableReadError:
@@ -209,19 +219,80 @@ class ControlledRelay:
                 self.phase = "paused"
                 raise
 
+    def tick_scheduled(self):
+        if self.phase == "active" and self.scheduled is not None:
+            try:
+                self.reconciled()
+                result = self.scheduled.queue.tick()
+                self.reconciled()
+                return result
+            except Exception:
+                self.phase = "paused"
+                raise
 
-def serve(module, root, release, activation_file=None):
+
+def run_loop(controller, server, config, stopping, scheduled_server=None):
+    """同一线程串行处理控制、准入、SQLite 与全部企微发送。"""
+    servers = [server] + ([scheduled_server] if scheduled_server is not None else [])
+    for listener in servers:
+        listener.timeout = 0
+    next_poll = time.monotonic()
+    next_tick = next_poll
+    while not stopping():
+        readable, _, _ = select.select(servers, [], [], 0.25)
+        # 优先处理控制请求，已确认的暂停同样阻断到期任务。
+        for listener in servers:
+            if stopping():
+                break
+            if listener in readable:
+                listener.handle_request()
+        if stopping() or controller.phase != "active":
+            continue
+        if controller.scheduled is not None and time.monotonic() >= next_tick:
+            try:
+                controller.tick_scheduled()
+            except Exception:
+                print('{"event":"delivery_paused_requires_reconcile"}', flush=True)
+                continue
+            next_tick = time.monotonic() + 0.25
+        if controller.phase == "active" and time.monotonic() >= next_poll:
+            try:
+                processed = controller.poll()
+            except RetryableReadError as error:
+                event = "notice_read_retry" if str(error) == "notice_read_retry" else "history_read_retry"
+                print(json.dumps({"event": event}), flush=True)
+                next_poll = time.monotonic() + min(config["poll_seconds"], 30)
+            except Exception:
+                controller.phase = "paused"
+                print('{"event":"delivery_paused_requires_reconcile"}', flush=True)
+            else:
+                next_poll = time.monotonic() + (0 if processed else config["poll_seconds"])
+
+
+def serve(module, root, release, activation_file=None, scheduler_config=None):
     config = module.load_config(root)
+    # 安装包或修改应用配置不能隐式启用定时发送。
+    scheduled_options = None
+    if scheduler_config is not None:
+        if __package__:
+            from .scheduled_runtime import ScheduledRuntime, load_config as load_scheduled_config
+        else:
+            from scheduled_runtime import ScheduledRuntime, load_config as load_scheduled_config
+        scheduled_options = load_scheduled_config(scheduler_config)
     with module.exclusive(root):
         credentials = module.load_secrets(root)
         slack = module.Slack(credentials["slack_user_token"], config)
         slack.verify()
         store = module.Store(root / "state")
+        scheduled = None
         try:
-            assert_reconciled(store)
+            if scheduled_options is None:
+                assert_reconciled(store)
             receiver = resume_class(module)(store, slack, module.WeCom(credentials["wecom_webhook"]), config)
             receiver.baseline()
-            controller = ControlledRelay(module, receiver, release, activation_file)
+            if scheduled_options is not None:
+                scheduled = ScheduledRuntime(scheduled_options, store, config, receiver.wecom)
+            controller = ControlledRelay(module, receiver, release, activation_file, scheduled)
             controller.ready()
             if activation_file and activation_file.exists():
                 info = activation_file.lstat()
@@ -246,27 +317,18 @@ def serve(module, root, release, activation_file=None):
             try:
                 with socketserver.UnixStreamServer(str(socket_path), module.Handler) as server:
                     os.chmod(socket_path, 0o600)
-                    server.relay, server.timeout = controller, 0.25
-                    next_poll = time.monotonic()
-                    while not stopping:
-                        server.handle_request()
-                        if not stopping and controller.phase == "active" and time.monotonic() >= next_poll:
-                            try:
-                                processed = controller.poll()
-                            except RetryableReadError as error:
-                                event = "notice_read_retry" if str(error) == "notice_read_retry" else "history_read_retry"
-                                print(json.dumps({"event": event}), flush=True)
-                                next_poll = time.monotonic() + min(config["poll_seconds"], 30)
-                            except Exception:
-                                controller.phase = "paused"
-                                print('{"event":"delivery_paused_requires_reconcile"}', flush=True)
-                            else:
-                                next_poll = time.monotonic() + (0 if processed else config["poll_seconds"])
+                    server.relay = controller
+                    scheduled_server = scheduled.open(lambda: controller.phase == "active") if scheduled is not None else None
+                    run_loop(controller, server, config, lambda: stopping, scheduled_server)
             finally:
                 signal.signal(signal.SIGTERM, previous)
                 socket_path.unlink(missing_ok=True)
         finally:
-            store.db.close()
+            try:
+                if scheduled is not None:
+                    scheduled.close()
+            finally:
+                store.db.close()
 
 
 def control(module, root, operation, release, deadline, nonce=None):
@@ -296,6 +358,7 @@ def main():
     parser.add_argument("--release")
     parser.add_argument("--operation", choices=("status", "pause", "activate"))
     parser.add_argument("--activation-file", type=Path)
+    parser.add_argument("--scheduler-config", type=Path)
     parser.add_argument("--deadline", type=float)
     parser.add_argument("--activation-nonce")
     args = parser.parse_args()
@@ -318,7 +381,7 @@ def main():
             raise ValueError("operation_required")
         control(module, args.root, args.operation, args.release, args.deadline, args.activation_nonce)
     else:
-        serve(module, args.root, args.release, args.activation_file)
+        serve(module, args.root, args.release, args.activation_file, args.scheduler_config)
 
 
 if __name__ == "__main__":

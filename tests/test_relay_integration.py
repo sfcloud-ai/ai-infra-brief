@@ -86,10 +86,10 @@ class RelayIntegrationTests(unittest.TestCase):
 
     def test_original_and_connector_tests_run_with_outbound_guard(self):
         result = self.checked_runner()
-        self.assertEqual(result["tests_run"], 135)  # 原有 122 项及报告包原图传输 13 项。
+        self.assertEqual(result["tests_run"], 157)  # 原有 135 项加调度与协议 22 项。
         self.assertEqual(result["outbound_attempts"], 0)
         if result["skipped"]:
-            self.assertEqual(result["skipped"], 1)
+            self.assertEqual(result["skipped"], 3)
             self.skipTest("原 Unix socket 项因沙箱能力不足跳过，其余项目通过；CI 严格执行。")
 
     def test_outbound_guard_rejects_socket_and_dns_before_network(self):

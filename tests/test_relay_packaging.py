@@ -64,6 +64,18 @@ class RelayPackagingTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout),
                          {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0})
 
+    def test_installed_scheduler_is_importable_but_has_no_sender_entrypoint(self):
+        code = ("from ai_brief_relay import scheduled_runtime,scheduled_delivery,scheduled_socket,"
+                "scheduled_verifier,scheduled_client; "
+                "assert callable(scheduled_runtime.load_config); "
+                "assert callable(scheduled_client.query)")
+        result = subprocess.run([str(self.python), "-I", "-c", code], cwd=self.root,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with ZipFile(self.wheel) as archive:
+            entrypoints = archive.read(next(n for n in archive.namelist() if n.endswith("/entry_points.txt"))).decode()
+        self.assertNotIn("scheduled", entrypoints)
+
     def test_installed_notice_checker_needs_no_brief_package_and_fails_closed(self):
         command = str(self.environment / "bin/ai-brief-notice-check")
         help_result = subprocess.run([command, "--help"], cwd=self.root, capture_output=True, text=True, timeout=30)
