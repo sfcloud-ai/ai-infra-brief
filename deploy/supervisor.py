@@ -13,13 +13,19 @@ import uuid
 if __package__:
     from .release import write_json
     from . import notice_service
+    from .scheduler_service import SchedulerDeployment, LABEL as SCHEDULER_LABEL
 else:
     from release import write_json
     import notice_service
+    from scheduler_service import SchedulerDeployment, LABEL as SCHEDULER_LABEL
 
 
 class ServiceError(Exception):
     pass
+
+
+class CutoverDeferred(ServiceError):
+    """原服务原子拒绝排空且仍在运行，尚未撤销重启授权或开始切换。"""
 
 
 class Supervisor:
@@ -32,6 +38,8 @@ class Supervisor:
             return
         pending = json.loads(self.pending.read_text())
         before, target = pending["before"], pending["target"]
+        if hasattr(self.driver, "preflight_recovery"):
+            self.driver.preflight_recovery(pending)
         # 只有持久记录证明从未发起激活时，才允许不经控制 socket 终止候选。
         if pending.get("activation_attempted", True) is False:
             self.driver.abort_start(target, before)
@@ -58,10 +66,13 @@ class Supervisor:
         if before is None:
             before = self.driver.capture_legacy()
             self.policy.completed(before)
+        if hasattr(self.driver, "preflight_rollback"):
+            self.driver.preflight_rollback(before)
         if target == before:
             self.driver.wait_healthy(target)
             return
-        pending = {"before": before, "target": target, "activation_attempted": False}
+        pending = {"before": before, "target": target, "activation_attempted": False,
+                   "scheduler_binding": self.driver.scheduler_binding() if hasattr(self.driver, "scheduler_binding") else None}
         write_json(self.pending, pending)
         stopped = False
         try:
@@ -77,6 +88,11 @@ class Supervisor:
             self.driver.wait_healthy(target)
             self.policy.completed(target)
             self.pending.unlink()
+        except CutoverDeferred:
+            # 仅初次排空的明确拒绝可撤销意图；丢失响应与回滚失败仍保留原记录。
+            if not stopped and pending["activation_attempted"] is False:
+                self.pending.unlink()
+            raise
         except Exception:
             if stopped or self.driver.current_sender() is None:
                 # 若新实例无法确认已排空，就保持 pending，不冒险启动第二个发送者。
@@ -90,8 +106,8 @@ class DockerDriver:
         self.config, self.control = config, Path(control_root)
         required = {"container", "legacy_container", "relay_root", "control_code", "legacy_relay", "legacy_images"}
         live = config["live"]
-        if (not required <= set(live) or set(live) - required - {"notice_service"}
-                or type(live.get("notice_service", False)) is not bool):
+        if (not required <= set(live) or set(live) - required - {"notice_service", "scheduler"}
+                or any(type(live.get(k, False)) is not bool for k in ("notice_service", "scheduler"))):
             raise ServiceError("invalid_live_configuration")
         for name in ("container", "legacy_container"):
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,80}", live[name]):
@@ -107,6 +123,7 @@ class DockerDriver:
             if not path.is_absolute() or path.name != basename or ".." in path.parts:
                 raise ServiceError("invalid_legacy_code_path")
         self.live = live
+        self.scheduler = SchedulerDeployment(config["uid"], config["gid"]) if live.get("scheduler") else None
         self.legacy_path = self.control / "legacy.json"
         self.activation = self.control / "activation"
         self.activation.mkdir(mode=0o755, exist_ok=True)
@@ -196,6 +213,27 @@ class DockerDriver:
             raise ServiceError("release_capabilities_failed")
         if self.live.get("notice_service"):
             notice_service.preflight(release)
+        if getattr(self, "scheduler", None) is not None:
+            self.scheduler.preflight(self, release)
+
+    def preflight_rollback(self, release):
+        # 显式调度启用后，回滚也必须能继续识别同一账本与接口；停旧实例前检查。
+        current = self.inspect(self.live["container"])
+        binding = ((current or {}).get("Config", {}).get("Labels") or {}).get(SCHEDULER_LABEL)
+        if binding and (getattr(self, "scheduler", None) is None or binding != self.scheduler.binding):
+            raise ServiceError("scheduler_scope_change_requires_reconciliation")
+        if getattr(self, "scheduler", None) is not None:
+            self.preflight(release)
+
+    def scheduler_binding(self):
+        scheduler = getattr(self, "scheduler", None)
+        return scheduler.binding if scheduler is not None else None
+
+    def preflight_recovery(self, pending):
+        # 即使候选容器已消失，也必须保留中断前绑定；缺少绑定的旧记录不授权新接口。
+        if pending.get("scheduler_binding") != self.scheduler_binding():
+            raise ServiceError("scheduler_recovery_scope_changed")
+        self.preflight_rollback(pending["before"])
 
     def common(self, readonly_state=False):
         uid = str(self.config["uid"])
@@ -213,7 +251,18 @@ class DockerDriver:
                  "-e", "PYTHONDONTWRITEBYTECODE=1"]
         if self.legacy():
             flags += ["--mount", "type=bind,src=" + str(self.control / "legacy-code") + ",dst=/legacy,readonly"]
+        if getattr(self, "scheduler", None) is not None:
+            flags += self.scheduler.mounts(readonly_ipc=readonly_state)
         return flags
+
+    def assert_scheduler_binding(self):
+        current = self.inspect(self.live["container"])
+        if current is None:
+            raise ServiceError("managed_container_missing")
+        if getattr(self, "scheduler", None) is not None:
+            self.scheduler.assert_container(current)
+        elif (current["Config"].get("Labels") or {}).get(SCHEDULER_LABEL):
+            raise ServiceError("scheduler_disable_requires_reconciliation")
 
     def running_release(self):
         current = self.inspect(self.live["container"])
@@ -257,12 +306,14 @@ class DockerDriver:
         return json.loads(result.stdout)
 
     def wait(self, release, active=False):
+        self.assert_scheduler_binding()
         deadline = time.monotonic() + (1800 if active else 180)
         while time.monotonic() < deadline:
             try:
                 status = self.status(release, deadline=deadline)
+                readiness = "delivery_ready" if active and getattr(self, "scheduler", None) is not None else "reconciled"
                 if (status.get("phase") == ("active" if active else "paused")
-                        and status.get("reconciled") is True and status.get("in_flight") is False
+                        and status.get(readiness) is True and status.get("in_flight") is False
                         and (not active or status.get("successful_polls", 0) >= 1)):
                     return
             except (ServiceError, ValueError, subprocess.TimeoutExpired):
@@ -290,7 +341,8 @@ class DockerDriver:
         write_json(self.activation / "permit.json", {"release": release, "nonce": nonce})
         os.chmod(self.activation / "permit.json", 0o444)
         result = self.status(release, "activate", nonce=nonce)
-        if result.get("phase") != "active" or result.get("reconciled") is not True:
+        readiness = "delivery_ready" if getattr(self, "scheduler", None) is not None else "reconciled"
+        if result.get("phase") != "active" or result.get(readiness) is not True:
             raise ServiceError("relay_activation_failed")
 
     def handoff(self, release):
@@ -333,10 +385,20 @@ class DockerDriver:
         if managed:
             if managed != release:
                 raise ServiceError("unexpected_active_instance")
+            scheduled = getattr(self, "scheduler", None) is not None
+            if scheduled:
+                result = self.status(release, "drain")
+                if (result.get("release") == release and result.get("phase") == "active"
+                        and result.get("reconciled") is False and result.get("in_flight") is False):
+                    raise CutoverDeferred("scheduled_work_defers_cutover")
+                if (result.get("release") != release or result.get("phase") != "paused"
+                        or result.get("reconciled") is not True or result.get("in_flight") is not False):
+                    raise ServiceError("unreconciled_delivery_blocks_stop")
             # 同时撤销迟到请求和自动重启的授权，然后才请求排空。
             self.revoke_permit()
             write_json(self.activation / "active.json", {"release": None})
             os.chmod(self.activation / "active.json", 0o444)
+            # drain 与撤销授权之间可能发生容器重启；必须重新确认当前进程已暂停。
             result = self.status(release, "pause")
             if (result.get("phase") != "paused" or result.get("reconciled") is not True
                     or result.get("in_flight") is not False):
@@ -374,9 +436,12 @@ class DockerDriver:
             self.command(["rm", self.live["container"]])
         (self.activation / "active.json").unlink(missing_ok=True)
         self.revoke_permit()
+        scheduler = getattr(self, "scheduler", None)
+        labels = ["--label", SCHEDULER_LABEL + "=" + scheduler.binding] if scheduler is not None else []
         self.command(["run", "-d", "--pull", "never", "--name", self.live["container"],
                       "--label", "sfcloud.ai.service=ai-infra-brief", "--label", "sfcloud.ai.release=" + release,
-                      "--restart", "unless-stopped", "--network", "bridge"] + self.common()
+                      "--restart", "unless-stopped", "--network", "bridge"] + labels + self.common()
                      + [self.config["image"], "python", self.runtime(release), "serve", "--root", "/relay",
                         "--code", self.code(release), "--release", release,
-                        "--activation-file", "/activation/active.json"])
+                        "--activation-file", "/activation/active.json"]
+                     + (scheduler.serve_args() if scheduler is not None else []))

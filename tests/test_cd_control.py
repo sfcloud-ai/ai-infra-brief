@@ -395,7 +395,8 @@ class RuntimeControlTests(unittest.TestCase):
             clock[0] += 1000
             raise subprocess.TimeoutExpired("synthetic_exec", 1)
         with patch("deploy.supervisor.time.monotonic", side_effect=lambda: clock[0]), \
-                patch("deploy.supervisor.time.sleep"), patch.object(driver, "status", side_effect=status):
+                patch("deploy.supervisor.time.sleep"), patch.object(driver, "status", side_effect=status), \
+                patch.object(driver, "assert_scheduler_binding"):
             with self.assertRaisesRegex(ServiceError, "relay_health_deadline"):
                 driver.wait("a" * 40, active=True)
         self.assertEqual(deadlines, [1900.0, 1900.0])

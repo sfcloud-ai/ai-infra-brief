@@ -17,6 +17,8 @@ import sys
 import time
 from types import SimpleNamespace
 
+SCHEDULER_DRAIN_VERSION = 1
+
 if __package__:
     from . import resume as resume_adapter
     from .resume import RetryableReadError, assert_reconciled, binding, resume_class
@@ -166,7 +168,18 @@ class ControlledRelay:
             # 在任何状态变更前拒绝过期请求，避免失去客户端的旧操作迟到生效。
             self.deadline(payload)
             operation = path.removeprefix("/control/")
-            if operation == "pause":
+            if operation == "drain":
+                # 与准入、发送同线程：有未完成任务则保持原状，让旧服务继续处理。
+                # 检查成功后立即暂停，后续 socket 准入也会被活动状态门禁拒绝。
+                try:
+                    assert_reconciled(self.receiver.store)
+                except ValueError:
+                    pass
+                else:
+                    if self.activation_file is not None:
+                        self.revoked_nonce = self.permit().get("nonce")
+                    self.phase = "paused"
+            elif operation == "pause":
                 self.phase = "paused"
                 if self.activation_file is not None:
                     self.revoked_nonce = self.permit().get("nonce")
@@ -188,8 +201,16 @@ class ControlledRelay:
                 reconciled = True
             except ValueError:
                 reconciled = False
+            delivery_ready = reconciled
+            if self.scheduled is not None:
+                try:
+                    self.reconciled()
+                    delivery_ready = True
+                except ValueError:
+                    delivery_ready = False
             return {"release": self.release, "phase": self.phase, "in_flight": False,
-                    "reconciled": reconciled, "successful_polls": self.polls}
+                    "reconciled": reconciled, "delivery_ready": delivery_ready,
+                    "successful_polls": self.polls}
         if self.phase != "active" and path != "/status":
             raise self.module.RelayError("delivery_paused", 409)
         if path == "/status":
@@ -356,7 +377,7 @@ def main():
     parser.add_argument("--root", type=Path)
     parser.add_argument("--code", type=Path)
     parser.add_argument("--release")
-    parser.add_argument("--operation", choices=("status", "pause", "activate"))
+    parser.add_argument("--operation", choices=("status", "pause", "drain", "activate"))
     parser.add_argument("--activation-file", type=Path)
     parser.add_argument("--scheduler-config", type=Path)
     parser.add_argument("--deadline", type=float)

@@ -149,6 +149,29 @@ class ControlSwitchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'candidate_failed'):
             self.execute(lambda *args: self.fail('不能再次执行失败候选'))
 
+    def test_deferred_application_keeps_candidate_retryable_after_queue_drains(self):
+        result = SimpleNamespace(returncode=75, stdout=json.dumps({'status': 'deferred', 'commit': self.target}).encode())
+        for _ in range(2):
+            self.assertIs(self.execute(lambda *args: result), result)
+            self.assertEqual(control.current_record(self.root)[0], self.old)
+            self.assertFalse((self.root / 'control-blocked.json').exists())
+            self.assertFalse((self.root / 'control-pending.json').exists())
+        def completed(*args):
+            control.save(self.root / 'policy.json', {'active': self.target})
+            return SimpleNamespace(returncode=0)
+        self.execute(completed)
+        self.assertEqual(control.current_record(self.root)[0], self.new)
+
+    def test_deferred_protocol_cannot_hide_unknown_or_mismatched_application(self):
+        for stdout in (b'bad', b'{}', json.dumps({'status': 'deferred', 'commit': self.before}).encode()):
+            self.assertFalse(control.deferred(SimpleNamespace(returncode=75, stdout=stdout), self.target))
+        def unknown(*args):
+            control.save(self.root / 'switch-pending.json', {'target': self.target})
+            return SimpleNamespace(returncode=75, stdout=json.dumps({'status': 'deferred', 'commit': self.target}).encode())
+        with self.assertRaisesRegex(ValueError, 'requires_reconciliation'):
+            self.execute(unknown)
+        self.assertTrue((self.root / 'control-pending.json').exists())
+
     def test_unknown_call_keeps_intent_and_does_not_retry_after_restart(self):
         def timeout(*args):
             raise TimeoutError('outcome unknown')
