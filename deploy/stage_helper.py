@@ -15,12 +15,12 @@ if __package__:
     from .policy import Policy
     from .release import RECEIVER_FORMAT
     from .ssh_entry import parse_command
-    from .supervisor import DockerDriver, ServiceError, Supervisor
+    from .supervisor import DockerDriver, ServiceError, Supervisor, CutoverDeferred
 else:
     from policy import Policy
     from release import RECEIVER_FORMAT
     from ssh_entry import parse_command
-    from supervisor import DockerDriver, ServiceError, Supervisor
+    from supervisor import DockerDriver, ServiceError, Supervisor, CutoverDeferred
 
 CONFIG = Path("/etc/ai-brief-stage.json")
 CODE_ROOT = Path(__file__).resolve().parent
@@ -100,13 +100,19 @@ def execute(command, config, control_root, stage_runner=stage, driver_factory=Do
         if not config.get("live_enabled"):
             return {"status": "staged_only_production_disabled", "commit": first}
         supervisor = Supervisor(control_root, driver_factory(config, control_root), policy)
-        supervisor.switch(first)
+        try:
+            supervisor.switch(first)
+        except CutoverDeferred:
+            return {"status": "deferred", "commit": first}
         return {"status": "activated", "commit": first, "sequence": sequence}
     if not config.get("live_enabled"):
         raise ValueError("production_disabled")
     policy.begin_rollback(sequence, first, second)
     supervisor = Supervisor(control_root, driver_factory(config, control_root), policy)
-    supervisor.switch(second)
+    try:
+        supervisor.switch(second)
+    except CutoverDeferred:
+        return {"status": "deferred", "commit": second}
     policy.rolled_back(second)
     return {"status": "rolled_back", "commit": second, "sequence": sequence}
 
@@ -116,7 +122,7 @@ def main():
         raise ValueError("restricted_helper_only")
     command = parse_command(" ".join(sys.argv[1:]))
     for path in (CONFIG, CONTROLLER, CODE_ROOT / "policy.py", CODE_ROOT / "supervisor.py",
-                 CODE_ROOT / "notice_service.py", CODE_ROOT / "ssh_entry.py"):
+                 CODE_ROOT / "notice_service.py", CODE_ROOT / "scheduler_service.py", CODE_ROOT / "ssh_entry.py"):
         root_owned_file(path)
     config = json.loads(CONFIG.read_text())
     # 即使是 status/rollback，也验证固定配置，不能让未验证路径进入 Docker。
@@ -138,14 +144,16 @@ def main():
     fd = os.open(CONTROL_ROOT / "deployment.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps(execute(command, config, CONTROL_ROOT)))
+        result = execute(command, config, CONTROL_ROOT)
+        print(json.dumps(result))
+        return 75 if result.get("status") == "deferred" else 0
     finally:
         os.close(fd)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except Exception:
         print('{"error":"restricted_deployment_failed"}', file=sys.stderr)
         raise SystemExit(1)

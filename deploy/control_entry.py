@@ -235,6 +235,16 @@ def invoke(directory, arguments):
                           cwd='/', env={'PATH': '/usr/bin:/bin', 'HOME': '/root'})
 
 
+def deferred(result, commit):
+    """只有精确的延期协议可保留候选重试资格，普通失败仍进入阻断记录。"""
+    if result.returncode != 75:
+        return False
+    try:
+        return len(result.stdout) <= 4096 and json.loads(result.stdout) == {'status': 'deferred', 'commit': commit}
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 def execute(arguments, root=ROOT, prepare=stage, call=invoke):
     arguments = parse(list(arguments))
     before, directory = current_record(root)
@@ -265,6 +275,10 @@ def execute(arguments, root=ROOT, prepare=stage, call=invoke):
     if result.returncode == 0 and policy['active'] == arguments[2]:
         save(root / 'control-previous.json', before)
         record['phase'] = 'healthy'
+    elif deferred(result, arguments[2]) and policy['active'] == record['application_before']:
+        verify_record(before, root)
+        save(root / 'control-release.json', before)
+        record['phase'] = 'application_deferred'
     elif result.returncode != 0 and policy['active'] == record['application_before']:
         verify_record(before, root)
         save(root / 'control-release.json', before)
