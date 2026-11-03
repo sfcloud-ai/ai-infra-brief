@@ -126,10 +126,11 @@ class NoticeDeliveryTests(unittest.TestCase):
         self.slack.messages = [notice(), notice(2, file_id="FTEST2"), notice(3, revision=2), brief(4)]
         for _ in range(6):
             receiver.poll()
-        self.assertEqual(self.wecom.sent[:2], [receiver.delivery_text(notice()), receiver.delivery_text(notice(3, revision=2))])
-        self.assertEqual(len(self.wecom.sent), 3)  # 原有机器人发送者仍可投递。
-        self.assertEqual(len(self.images), 2)
-        self.assertEqual(self.downloads, ["FTEST1", "FTEST1"])
+        self.assertEqual(self.wecom.sent[0], receiver.delivery_text(notice()))
+        self.assertEqual(len(self.wecom.sent), 2)  # 按日期去重阻止 r2 重发，原机器人消息仍受支持。
+        self.assertEqual(self.store.status("auto:" + ts(3))["status"], "already_sent")
+        self.assertEqual(len(self.images), 1)
+        self.assertEqual(self.downloads, ["FTEST1"])
         self.assertEqual(self.store.status("auto:" + ts(2))["status"], "already_sent")
         self.assertEqual(self.store.get("cursor"), ts(4))
 

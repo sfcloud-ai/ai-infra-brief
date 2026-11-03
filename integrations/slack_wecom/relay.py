@@ -711,7 +711,9 @@ class Store:
         self.db.execute("UPDATE requests SET status='unknown' WHERE status='sending'")
         self.db.execute("UPDATE parts SET status='unknown' WHERE status='sending'")
         self.db.execute("UPDATE image_parts SET status='unknown' WHERE status='sending'")
-        self.db.execute("UPDATE image_parts SET status='not_attempted' WHERE status IN ('pending','downloading')")
+        self.db.execute("""UPDATE image_parts SET status='not_attempted'
+            WHERE status IN ('pending','downloading') AND request_id NOT IN
+            (SELECT id FROM requests WHERE mode='scheduled')""")
         self.db.commit()
 
     def get(self, key, default=None):
@@ -878,9 +880,12 @@ class Relay:
     def deliver(self, request_id, intent, text, timestamp, mode, uid, repeat=False, reason="", image_plans=(), notice_key=None):
         pieces = chunks(text)
         source = digest([self.config["team_id"], self.config["channel_id"], timestamp]) if timestamp else None
-        edition = None
+        edition = day_key = None
         if notice_key is not None:
-            notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")))
+            if not isinstance(timestamp, str) or not TS.fullmatch(timestamp):
+                raise RelayError("notice_source_timestamp_required")
+            report_date = notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")))
+            day_key = "notice_day:" + digest([self.config["team_id"], self.config["channel_id"], report_date])
             edition = "notice_edition:" + digest([self.config["team_id"], self.config["channel_id"], notice_key])
         db = self.store.db
         verified_images = {}
@@ -893,7 +898,10 @@ class Relay:
                 if row[0] != digest(intent):
                     raise RelayError("request_id_conflict", 409)
                 return self.store.status(request_id)
-            edition_request = self.store.get(edition) if edition else None
+            edition_request = (self.store.get(day_key) if day_key else None) or (self.store.get(edition) if edition else None)
+            if repeat and edition and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_notices'").fetchone():
+                if db.execute("SELECT 1 FROM scheduled_notices WHERE report_date=? AND phase!='complete' LIMIT 1", (report_date,)).fetchone():
+                    raise RelayError("scheduled_reconciliation_required", 409)
             prior = db.execute("SELECT status FROM requests WHERE source_key=? OR message_ts=? OR id=? ORDER BY created DESC LIMIT 1",
                                (source, timestamp, edition_request)).fetchone() if source else None
             status, preflight_error = "sending", None
@@ -907,6 +915,8 @@ class Relay:
                        (request_id, digest(intent), source, mode, uid, self.clock(), timestamp, status, len(pieces) + len(image_plans), digest(reason) if reason else None))
             if edition and (edition_request is None or status in ("sending", "failed")):
                 db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (edition, request_id))
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (day_key, request_id))
+                db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("notice_edition_date:" + edition.split(":",1)[1], report_date))
             if status in ("sending", "failed"):
                 for index, plan in enumerate(image_plans):
                     image_status, error_code = "pending", None

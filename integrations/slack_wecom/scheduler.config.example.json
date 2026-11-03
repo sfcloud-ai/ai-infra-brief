@@ -1,0 +1,7 @@
+{
+  "activation_date": "2026-11-04",
+  "publisher_uid": 2001,
+  "socket_path": "/scheduled-ipc/scheduled.sock",
+  "node_path": "/opt/node-v24.22.2/bin/node",
+  "verifier_path": "/opt/report-verifier/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scripts/verify-scheduled-delivery.mjs"
+}
