@@ -323,7 +323,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("<script>", (Path(result["run_dir"]) / "brief.md").read_text())
 
     def test_versioned_prompts_require_useful_not_boilerplate_caveats(self):
-        for filename, version in (("research.md", "v1.2"), ("editor.md", "v1.3")):
+        for filename, version in (("research.md", "v1.3"), ("editor.md", "v1.4")):
             text = (RESOURCE_ROOT / "prompts" / filename).read_text()
             for required in (version, "不堆", "未独立复现", "作者报告", "影响选型", "紧邻", "空字符串", "来源"):
                 self.assertIn(required, text)

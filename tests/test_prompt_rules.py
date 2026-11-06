@@ -56,7 +56,8 @@ class PromptRuleTests(unittest.TestCase):
         ids = re.findall(r"^\| `([a-z][a-z0-9_]*)` \|", text, re.MULTILINE)
         self.assertEqual(len(ids), len(set(ids)))
         self.assertTrue({"nvidia_gpu_specs", "vllm", "sglang", "deepinfer", "glm", "deepseek_models", "qwen",
-                         "lmcache", "isaac_gr00t", "lerobot", "openpi", "gemma", "microsoft_small_models", "smol_models"} <= set(ids))
+                         "lmcache", "isaac_gr00t", "lerobot", "openpi", "gemma", "microsoft_small_models", "smol_models",
+                         "vllm_blog", "sglang_blog", "deepseek_research", "deepseek_infra_articles"} <= set(ids))
         for project in ("vllm-project/vllm", "sgl-project/sglang", "deepseek-ai/DeepInfer"):
             self.assertIn(f"https://github.com/{project}/pulls", text)
             self.assertIn(f"https://github.com/{project}/commits", text)
@@ -66,7 +67,8 @@ class PromptRuleTests(unittest.TestCase):
         links = re.findall(r"\]\((https?://[^)]+)\)", text)
         self.assertGreater(len(links), 15)
         hosts = {"github.com", "huggingface.co", "www.nvidia.com", "developer.nvidia.com",
-                 "docs.nvidia.com", "qwen.ai", "ai.google.dev"}
+                 "docs.nvidia.com", "qwen.ai", "ai.google.dev", "vllm.ai", "www.sglang.io",
+                 "www.lmsys.org", "www.deepseek.com"}
         for link in links:
             parsed = urlsplit(link)
             self.assertEqual(parsed.scheme, "https")
@@ -74,6 +76,45 @@ class PromptRuleTests(unittest.TestCase):
             self.assertIsNone(parsed.username)
             self.assertIsNone(parsed.password)
             self.assertFalse(parsed.query)
+
+    def test_official_blog_and_technical_article_entries_are_explicit(self):
+        sources = (PROMPTS / "sources.md").read_text(encoding="utf-8")
+        for url in ("https://vllm.ai/blog", "https://vllm.ai/blog/archive", "https://www.sglang.io/blog",
+                    "https://www.lmsys.org/blog/", "https://www.deepseek.com/news/",
+                    "https://github.com/deepseek-ai/open-infra-index"):
+            self.assertIn(f"]({url})", sources)
+        self.assertIn("DeepInfer", sources)
+        self.assertIn("FlashInfer", sources)
+        self.assertIn("不是文章精确发布时间", sources)
+
+    def test_research_prioritizes_articles_without_losing_repository_coverage(self):
+        research = (PROMPTS / "research.md").read_text(encoding="utf-8")
+        self.assertIn("vLLM 官方博客", research)
+        self.assertIn("SGLang 官方博客", research)
+        self.assertIn("DeepSeek/DeepInfer 官方技术文章", research)
+        self.assertIn("优先级可以高于零散引擎变更", research)
+        self.assertIn("博客/技术文章与代码变动分别记录覆盖结果", research)
+        for term in ("24h", "72h", "168h", "同一事件去重", "实质", "尚未核查", "访问失败"):
+            self.assertIn(term, research)
+
+    def test_editor_can_promote_technical_articles_without_duplicate_columns(self):
+        editor = (PROMPTS / "editor.md").read_text(encoding="utf-8")
+        self.assertIn("高价值的引擎技术文章可以作为技术洞察主文", editor)
+        self.assertIn("同一事件只出现一次", editor)
+        self.assertIn("三个栏目都保留", editor)
+        self.assertIn("相对历史报道的实质增量", editor)
+
+    def test_article_rules_preserve_metric_and_publication_time_boundaries(self):
+        for name in ("research.md", "editor.md"):
+            text = (PROMPTS / name).read_text(encoding="utf-8")
+            for term in ("DeepInfer", "FlashInfer", "自研融合", "kernel microbenchmark", "在线服务",
+                         "缓存输入 token", "接受长度", "prefill", "SLO", "比较基线",
+                         "时间精度", "午夜", "时区"):
+                self.assertIn(term, text, f"{name}: {term}")
+            self.assertRegex(text, r"输出(?: token)? ?吞吐")
+        research = (PROMPTS / "research.md").read_text(encoding="utf-8")
+        self.assertIn("不能把若干路径接入概括为", research)
+        self.assertIn("当前候选 schema 需要完整时间戳", research)
 
     def test_source_catalog_changes_affect_runtime_fingerprint(self):
         with tempfile.TemporaryDirectory() as directory:
