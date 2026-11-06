@@ -51,6 +51,21 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("notice.json", delivery)
         self.assertIn("访问失败保留消息和游标", delivery)
 
+    def test_real_prompts_require_private_audit_without_public_evidence(self):
+        for name in ("research.md", "editor.md"):
+            text = (PROMPTS / name).read_text(encoding="utf-8")
+            self.assertIn("[私有审计合同 audit.md](audit.md)", text)
+            self.assertIn("audit-research", text)
+            self.assertIn("只有任务明确启用", text)
+            self.assertIn("不自动改变现行晨报发布门禁", text)
+            self.assertIn("不覆盖同日修订", text)
+            self.assertIn("私有任务目录", text)
+            self.assertIn("停止发布", text)
+        audit = (PROMPTS / "audit.md").read_text(encoding="utf-8")
+        self.assertIn("unavailable_reason", audit)
+        self.assertIn("delivery_allowed=false", audit)
+        self.assertIn("不补造", audit)
+
     def test_source_catalog_has_unique_ids_and_required_coverage(self):
         text = (PROMPTS / "sources.md").read_text(encoding="utf-8")
         ids = re.findall(r"^\| `([a-z][a-z0-9_]*)` \|", text, re.MULTILINE)
