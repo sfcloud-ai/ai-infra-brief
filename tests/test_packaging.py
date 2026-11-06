@@ -161,6 +161,25 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(json.loads(output), {"commands": ["help", "ping", "status"],
                                             "read_only": True, "messages_sent": 0})
 
+    def test_installed_audit_validates_private_package_without_source_checkout(self):
+        from test_research_audit import ResearchAuditTests
+
+        fixture = ResearchAuditTests()
+        fixture.setUp()
+        try:
+            output = self.checked([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)], self.outside)
+            result = json.loads(output)
+            self.assertEqual(result["readiness"], "ready")
+            self.assertFalse(result["delivery_allowed"])
+            fixture.candidate["source_type"] = "secondary"
+            fixture.save()
+            invalid = subprocess.run([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)],
+                                     cwd=self.outside, env=self.environment, text=True, capture_output=True, timeout=30)
+            self.assertEqual(invalid.returncode, 2)
+            self.assertIn("primary source evidence", invalid.stderr)
+        finally:
+            fixture.doCleanups()
+
     def test_installed_cli_runs_outside_checkout(self):
         output = self.checked([str(self.python), "-I", "-B", "-c",
                                "import json,ai_brief; from ai_brief.contracts import RESOURCE_ROOT; "

@@ -6,6 +6,7 @@ import sys
 from .contracts import RESOURCE_ROOT
 from .pipeline import TZ, run, simulate_delivery
 from .storage import BriefError, json_text
+from .research_audit import validate_audit
 
 
 def main(argv=None):
@@ -22,15 +23,19 @@ def main(argv=None):
     deliver = commands.add_parser("simulate-delivery", help="Write one LOCAL mock receipt, never an external message")
     deliver.add_argument("--date", default=datetime.now(TZ).date().isoformat())
     deliver.add_argument("--adapter", default="mock")
+    audit = commands.add_parser("audit-research", help="Validate a PRIVATE live research package; never publish or send")
+    audit.add_argument("directory", type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
             result = run(args.state_dir, args.fixture, as_of=args.as_of, requested_date=args.date,
                          allow_backfill=args.allow_backfill, adapter=args.adapter, history_dir=args.history_dir)
+        elif args.command == "audit-research":
+            result = validate_audit(args.directory)
         else:
             result = simulate_delivery(args.state_dir, args.date, adapter=args.adapter)
         print(json_text(result), end="")
-        return 0
+        return 3 if args.command == "audit-research" and result["readiness"] == "blocked" else 0
     except (BriefError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
