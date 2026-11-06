@@ -105,6 +105,24 @@ class ResearchAuditTests(unittest.TestCase):
         self.audit["scope"] = "correction"
         self.reject("Invalid research-audit metadata schema")
 
+    def test_malformed_history_records_cannot_establish_new_daily_scope(self):
+        for report in ("2026-11-06", None, {}, {"date": None}, {"date": "bad"},
+                       {"date": "2026-02-30"}, {"date": "20261106"}, {"date": "2026-W45-5"}):
+            with self.subTest(report=report):
+                self.history["reports"] = [report]
+                self.reject("Invalid history report")
+
+    def test_operation_durations_must_fit_run_interval_without_summing_parallel_work(self):
+        self.audit["sources"][0]["elapsed_seconds"] = 601
+        self.reject("Source duration exceeds")
+        self.audit["sources"][0]["elapsed_seconds"] = 10
+        self.audit["model_calls"][0]["elapsed_seconds"] = 601
+        self.reject("Model duration exceeds")
+        self.audit["limits"]["operation_seconds"] = 600
+        self.audit["model_calls"][0]["elapsed_seconds"] = 400
+        self.audit["model_calls"][1]["elapsed_seconds"] = 400
+        self.assertEqual(self.check()["readiness"], "ready")
+
     def add_status(self):
         self.audit["status_entries"] = [{"event_key": "hardware-status-20261106", "source_ids": ["source"],
                                          "reason": "静态规格复核，不是新进展"}]

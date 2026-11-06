@@ -1,5 +1,6 @@
 """只读验证真实晨报的私有证据包，不联网、不发布、不修改投递状态。"""
 
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -97,8 +98,14 @@ def _validate_audit(directory):
     history = _json(history_bytes, "history")
     _require(isinstance(history, dict) and isinstance(history.get("entries"), list), "History must contain index entries")
     _require(isinstance(history.get("reports"), list), "History must contain report records")
-    _require(not any(isinstance(report, dict) and report.get("date") == metadata["date"]
-                     for report in history["reports"]),
+    for report in history["reports"]:
+        _require(isinstance(report, dict) and isinstance(report.get("date"), str), "Invalid history report record")
+        try:
+            valid_date = date.fromisoformat(report["date"]).isoformat() == report["date"]
+        except ValueError:
+            valid_date = False
+        _require(valid_date, "Invalid history report date")
+    _require(not any(report["date"] == metadata["date"] for report in history["reports"]),
              "Same-day corrections are outside the new-daily audit scope")
     history_entries = {}
     for entry in history["entries"]:
@@ -126,7 +133,8 @@ def _validate_audit(directory):
              "Audit date must match as_of in Asia/Shanghai")
     limits = metadata["limits"]
     blockers = []
-    if (finished - started).total_seconds() > limits["run_seconds"]:
+    run_elapsed = (finished - started).total_seconds()
+    if run_elapsed > limits["run_seconds"]:
         blockers.append("run_budget_exceeded")
 
     sources, source_text = {}, {}
@@ -139,6 +147,7 @@ def _validate_audit(directory):
         _require(started <= retrieved <= finished, "Source read time is outside this run")
         if source["published_at"] is not None:
             _require(_time(source["published_at"]) <= retrieved, "Source publication follows retrieval")
+        _require(source["elapsed_seconds"] <= run_elapsed, "Source duration exceeds recorded run interval")
         if source["attempts"] > limits["source_attempts"] or source["elapsed_seconds"] > limits["operation_seconds"]:
             blockers.append("source_budget_exceeded")
         if source["status"] == "ok":
@@ -171,6 +180,7 @@ def _validate_audit(directory):
         model = call["model"]
         if model["name"] is None or model["version"] is None:
             _require(bool(model["unavailable_reason"].strip()), "Unavailable model identity needs an honest explanation")
+        _require(call["elapsed_seconds"] <= run_elapsed, "Model duration exceeds recorded run interval")
         if call["attempts"] > limits["model_attempts"] or call["elapsed_seconds"] > limits["operation_seconds"]:
             blockers.append("model_budget_exceeded")
         if call["status"] == "ok":
