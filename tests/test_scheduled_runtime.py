@@ -50,6 +50,12 @@ class ScheduledConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scheduled_runtime.load_config(self.config)
 
+    def test_scheduled_only_requires_an_explicit_exact_mode(self):
+        self.assertEqual(self.load({"automatic_delivery": "scheduled_only"})["automatic_delivery"], "scheduled_only")
+        for mode in (None, True, "legacy", "scheduled-only", ""):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, "scheduled_only_mode"):
+                self.load({"automatic_delivery": mode})
+
     def test_distinct_positive_publisher_uid(self):
         for uid in (0, -1, True, "1001", os.getuid()):
             with self.subTest(uid=uid), self.assertRaises(ValueError):
@@ -229,6 +235,7 @@ class ScheduledLoopTests(unittest.TestCase):
                     patch.object(scheduled_runtime, "load_config", return_value={"synthetic": True}), \
                     patch.object(scheduled_runtime, "ScheduledRuntime") as scheduler:
                 server.side_effect = lambda *args: ((root / "run/relay.sock").touch() or MagicMock())
+                module.Store.return_value.get.return_value = None
                 runtime.serve(module, root, "a" * 40, scheduler_config=root / "scheduler.json")
             module.exclusive.assert_called_once_with(root)
             module.load_secrets.assert_called_once_with(root)
@@ -305,6 +312,12 @@ class FrozenScheduledGuardTests(unittest.TestCase):
         self.assertEqual(self.adapter.queue.status(first)["phase"], "unknown")
         self.assertEqual(self.adapter.queue.status("report-2026-11-02")["status"], "sent")
         self.assertEqual(self.controller.phase, "active")
+
+    def test_scheduled_only_preserves_frozen_unknown_and_next_day_progress(self):
+        self.controller.automatic_delivery = "scheduled_only"
+        self.test_frozen_unknown_does_not_block_independent_next_day_or_retry()
+        self.assertEqual(self.controller.polls, 0)
+        self.assertEqual(self.controller.scheduled_ticks, 3)
 
     def test_real_store_restart_preserves_unknown_and_scope(self):
         first = self.freeze()

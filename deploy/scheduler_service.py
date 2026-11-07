@@ -49,8 +49,10 @@ class SchedulerDeployment:
         if len(raw) > 8192:
             raise ValueError('scheduler_config_too_large')
         value = json.loads(raw, object_pairs_hook=unique)
-        if not isinstance(value, dict) or set(value) != FIELDS:
+        if not isinstance(value, dict) or set(value) not in (FIELDS, FIELDS | {'automatic_delivery'}):
             raise ValueError('exact_scheduler_configuration_required')
+        if 'automatic_delivery' in value and value['automatic_delivery'] != 'scheduled_only':
+            raise ValueError('explicit_scheduled_only_mode_required')
         if (type(uid) is not int or type(gid) is not int or min(uid, gid) <= 0
                 or type(value['publisher_uid']) is not int or value['publisher_uid'] <= 0
                 or value['publisher_uid'] == uid):
@@ -119,6 +121,7 @@ class SchedulerDeployment:
             'assert runtime.SCHEDULER_DRAIN_VERSION==1; '
             'assert "can_admit" in inspect.signature(scheduled_runtime.ScheduledRuntime.open).parameters; '
             'c=scheduled_runtime.load_config(Path(sys.argv[2])); '
+            'assert c.get("automatic_delivery")!="scheduled_only" or getattr(runtime,"SCHEDULED_ONLY_VERSION",0)==1; '
             'assert subprocess.check_output([c["node_path"],"--version"]).strip()==b"v24.22.2"; '
             'subprocess.run([c["node_path"],"--input-type=module","-e",'
             + repr(IMPORT_VERIFIER) + ',c["verifier_path"]],check=True,timeout=30)'

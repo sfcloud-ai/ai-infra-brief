@@ -832,7 +832,7 @@ class Relay:
             self.connected = False
             raise
 
-    def dispatch(self, path, payload, uid):
+    def dispatch(self, path, payload, uid, *, verify_slack=False):
         if uid != os.getuid():
             raise RelayError("forbidden", 403)
         self._notice_cache.clear()
@@ -870,6 +870,9 @@ class Relay:
         reason = payload.get("reason", "")
         if not isinstance(repeat, bool) or (repeat and (not isinstance(reason, str) or not reason.strip())):
             raise RelayError("repeat_requires_reason")
+        # 已存回执和意图冲突先由本地账本判定；仅新请求读取 Slack 前核验身份。
+        if verify_slack:
+            self.slack.verify()
         message = self.slack.exact(timestamp, thread_ts)
         if message.get("ts") != timestamp:
             raise RelayError("message_mismatch", 502)
