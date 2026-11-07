@@ -5,6 +5,7 @@
 不创建替代账本。
 """
 import datetime as dt
+import base64
 import hashlib
 import json
 import os
@@ -25,6 +26,18 @@ class ScheduledDeliveryError(ValueError):
 
 def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def inspection_identity(request_id, report_date):
+    """只读协议复用原请求身份；日期必须是规范的真实日历日期。"""
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", request_id):
+        raise ScheduledDeliveryError("Bounded original request ID required")
+    relay.notice_format.day_string(report_date)
+
+
+def inspect_require(condition):
+    if not condition:
+        raise ScheduledDeliveryError("Scheduled inspection requires reconciliation")
 
 
 def validate_plan(plan, bundle, commit):
@@ -130,6 +143,184 @@ class ScheduledDelivery:
         record=json.loads(row[4])
         return {**self.store.status(request_id), "phase": row[0], "next_attempt_at": row[1], "attempts": row[2], "last_error": row[3], **{k:record[k] for k in ("report_date","report_commit","bundle_sha256")}}
 
+    def inspect(self, request_id, report_date):
+        """返回原账本的点时快照；不准入、联网核验、投递或修复历史记录。"""
+        inspection_identity(request_id, report_date)
+        inspect_require(not self.db.in_transaction)
+        self.db.execute("BEGIN")
+        try:
+            observed_at = self.clock() * 1000
+            inspect_require(math.isfinite(observed_at) and 0 < observed_at <= 9007199254740991)
+            scope = self.store.get("scheduled_delivery_scope_v1")
+            inspect_require(scope == relay.digest({"config": self.config, "activation_date": self.activation_date}))
+            meta = dict(self._inspection_rows("SELECT key,value FROM meta WHERE key LIKE 'notice_edition:%' OR key LIKE 'notice_edition_date:%' OR key LIKE 'notice_day:%'", limit=10000))
+            rows = self.db.execute("SELECT request_id,report_date FROM scheduled_notices WHERE request_id=? OR report_date=?", (request_id, report_date)).fetchall()
+            inspect_require(len(rows) <= 1)
+            scheduler = claim = None
+            if rows:
+                inspect_require(rows[0] == (request_id, report_date))
+                scheduler = self._inspect_bound(request_id, report_date, meta)
+                claim = {k: scheduler[k] for k in ("request_id", "report_date", "bundle_sha256", "report_commit")}
+            else:
+                self._inspect_absence(request_id, report_date, meta)
+            return {"read_context": {"scheduler_scope_sha256": scope}, "observed_at": int(observed_at),
+                    "complete": True, "scheduler_day_claim": claim, "scheduler": scheduler}
+        finally:
+            # 只释放读取快照，不提交调用方事务或更改任何业务行。
+            self.db.rollback()
+
+    def _inspection_rows(self, sql, arguments=(), *, limit=1000):
+        rows = self.db.execute(sql + " LIMIT ?", (*arguments, limit + 1)).fetchall()
+        inspect_require(len(rows) <= limit)
+        return rows
+
+    def _inspect_bound(self, request_id, report_date, meta, *, check_current_claim=True):
+        row = self.db.execute("SELECT record,bundle,poster,due,phase,next_at,attempts,last_error FROM scheduled_notices WHERE request_id=?", (request_id,)).fetchone()
+        inspect_require(row is not None)
+        encoded, bundle, poster, due, phase, next_at, attempts, error = row
+        record = json.loads(encoded, object_pairs_hook=relay.notice_format._unique_object)
+        checked, _, expected_due = validate_plan({**record, "poster": poster}, bundle, record["report_commit"])
+        inspect_require(canonical(checked) == encoded and record["report_request_id"] == request_id
+                        and record["report_date"] == report_date and due == expected_due)
+        base = relay.validate_notice_connector(self.config["notice_connector"])["report_base_url"]
+        inspect_require(relay.notice_url_day(record["notice_key"], self.config["notice_connector"]) == report_date)
+        source = json.loads(bundle.decode("utf-8"), object_pairs_hook=relay.notice_format._unique_object)
+        inspect_require(source.get("request_id") == request_id and isinstance(source.get("files"), list))
+        metadata = [item for item in source["files"] if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].endswith("/report.json")]
+        inspect_require(len(metadata) == 1)
+        report_bytes = base64.b64decode(metadata[0]["base64"], validate=True)
+        report = json.loads(report_bytes.decode("utf-8"), object_pairs_hook=relay.notice_format._unique_object)
+        revision = report.get("revision")
+        inspect_require(type(revision) in (int, float) and math.isfinite(revision)
+                        and 0 < revision <= 9007199254740991 and int(revision) == revision)
+        manifest = relay.notice_format.build_manifest({**report, "revision": int(revision)}, base,
+                                                      hashlib.sha256(report_bytes).hexdigest(), record["report_commit"])
+        inspect_require(manifest["index_url"] == record["notice_key"] and manifest["text"] == record["text"]
+                        and manifest["poster"]["sha256"] == record["poster_sha256"]
+                        and relay.notice_format.bundle_poster(bundle, manifest, base) == poster)
+        if check_current_claim:
+            self._inspect_claim(request_id, report_date, record["notice_key"], meta)
+        original = self.db.execute("SELECT mode,intent_hash,status,parts_total,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
+        inspect_require(original is not None and original[:2] == ("scheduled", relay.digest(record)))
+        _, _, status, total, sent = original
+        pieces = relay.chunks(record["text"])
+        parts = self.db.execute("SELECT part,content_hash,status FROM parts WHERE request_id=? ORDER BY part", (request_id,)).fetchall()
+        images = self.db.execute("SELECT file_id,ordinal,status,content_hash,byte_size,error_code FROM image_parts WHERE request_id=? ORDER BY ordinal", (request_id,)).fetchall()
+        inspect_require(len(parts) == len(pieces) and len(images) == 1)
+        states = {"pending", "sending", "sent", "failed", "unknown"}
+        inspect_require(all(p[0] == i and p[1] == hashlib.sha256(pieces[i].encode()).hexdigest() and p[2] in states for i, p in enumerate(parts)))
+        image = images[0]
+        inspect_require(image[:2] == ("scheduled-poster", len(pieces)) and image[2] in states
+                        and image[3:5] == (record["poster_sha256"], len(poster)) and image[5] is None)
+        actual_sent = sum(p[2] == "sent" for p in parts) + int(image[2] == "sent")
+        inspect_require(type(total) is int and total == len(parts) + 1 and type(sent) is int and sent == actual_sent
+                        and status in {"queued", "sending", "sent", "failed", "unknown"}
+                        and phase in {"pending", "verifying", "sending", "unknown", "complete"})
+        inspect_require((status == "sent") == (phase == "complete") == (sent == total))
+        actual_states = [p[2] for p in parts] + [image[2]]
+        inspect_require((phase not in {"pending", "verifying"} or status in {"queued", "failed"})
+                        and (phase != "unknown" or status == "unknown")
+                        and (phase != "sending" or status in {"sending", "unknown"})
+                        and ("unknown" not in actual_states or status == "unknown")
+                        and ("sending" not in actual_states or phase == "sending")
+                        and (status != "unknown" or "unknown" in actual_states)
+                        and (status != "sending" or "sending" in actual_states))
+        inspect_require(type(next_at) in (int, float) and math.isfinite(next_at) and next_at > 0
+                        and type(attempts) is int and 0 <= attempts <= 9007199254740991
+                        and (error is None or isinstance(error, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", error)))
+        return {"request_id": request_id, "report_date": report_date, "bundle_sha256": record["bundle_sha256"],
+                "report_commit": record["report_commit"], "status": status, "parts_total": total, "parts_sent": sent,
+                "phase": phase, "next_attempt_at": next_at, "attempts": attempts, "last_error": error,
+                "images": [{"file_id": image[0], "status": image[2], "error": image[5]}]}
+
+    def _inspect_claim(self, request_id, report_date, notice_key, meta):
+        suffix = relay.digest([self.config["team_id"], self.config["channel_id"], notice_key])
+        day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], report_date])
+        inspect_require(meta.get(day_key) == request_id and meta.get("notice_edition:" + suffix) == request_id
+                        and meta.get("notice_edition_date:" + suffix) == report_date)
+        for key, day in meta.items():
+            if key.startswith("notice_edition_date:") and day == report_date:
+                inspect_require(meta.get("notice_edition:" + key.split(":", 1)[1]) == request_id)
+
+    def _inspect_completed_handoff(self, request_id, report_date, owner, meta):
+        """已完成定时记录可由显式手动重发接替；旧记录和接替回执必须均完整。"""
+        original = self._inspect_bound(request_id, report_date, meta, check_current_claim=False)
+        inspect_require(original["status"] == "sent" and original["phase"] == "complete")
+        record = json.loads(self.db.execute("SELECT record FROM scheduled_notices WHERE request_id=?", (request_id,)).fetchone()[0])
+        suffix = relay.digest([self.config["team_id"], self.config["channel_id"], record["notice_key"]])
+        day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], report_date])
+        inspect_require(meta.get(day_key) == owner and meta.get("notice_edition_date:" + suffix) == report_date
+                        and "notice_edition:" + suffix in meta)
+        owners = {meta.get("notice_edition:" + key.split(":", 1)[1]) for key, day in meta.items()
+                  if key.startswith("notice_edition_date:") and day == report_date}
+        inspect_require(owner in owners)
+        # 换版手动重发只接管新版本；旧版本可继续指向已完成的原始或手动回执。
+        for edition_owner in owners - {request_id}:
+            self._inspect_completed_manual_owner(request_id, edition_owner)
+
+    def _inspect_completed_manual_owner(self, request_id, owner):
+        row = self.db.execute("SELECT mode,status,parts_total,parts_sent,reason_hash,message_ts,source_key,created FROM requests WHERE id=?", (owner,)).fetchone()
+        inspect_require(row is not None)
+        mode, status, total, sent, reason, timestamp, source, created = row
+        previous = self.db.execute("SELECT created FROM requests WHERE id=?", (request_id,)).fetchone()[0]
+        inspect_require(mode == "manual_slack" and status == "sent"
+                        and type(total) is int and total > 0 and type(sent) is int and sent == total
+                        and isinstance(reason, str) and re.fullmatch(r"[a-f0-9]{64}", reason)
+                        and isinstance(timestamp, str) and relay.TS.fullmatch(timestamp)
+                        and source == relay.digest([self.config["team_id"], self.config["channel_id"], timestamp])
+                        and type(created) in (int, float) and math.isfinite(created)
+                        and type(previous) in (int, float) and math.isfinite(previous) and created >= previous)
+        parts = self.db.execute("SELECT part,content_hash,status FROM parts WHERE request_id=? ORDER BY part", (owner,)).fetchall()
+        images = self.db.execute("SELECT ordinal,content_hash,status,byte_size,error_code FROM image_parts WHERE request_id=? ORDER BY ordinal", (owner,)).fetchall()
+        inspect_require(parts and len(parts) + len(images) == total
+                        and all(part == i and state == "sent" and isinstance(digest, str)
+                                and re.fullmatch(r"[a-f0-9]{64}", digest) for i, (part, digest, state) in enumerate(parts))
+                        and all(ordinal == i and state == "sent" and isinstance(digest, str)
+                                and re.fullmatch(r"[a-f0-9]{64}", digest) and type(size) is int and size > 0
+                                and error is None for i, (ordinal, digest, state, size, error) in enumerate(images)))
+
+    def _inspect_absence(self, request_id, report_date, meta):
+        """缺失目标不是空日证明；未归属的旧声明和孤儿记录均阻断。"""
+        inspect_require(self.db.execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone() is None)
+        owners, expected_days = {}, {}
+        for key, owner in meta.items():
+            inspect_require(re.fullmatch(r"notice_(?:edition|edition_date|day):[a-f0-9]{64}", key) is not None)
+            if not key.startswith("notice_edition:"):
+                continue
+            day = meta.get("notice_edition_date:" + key.split(":", 1)[1])
+            relay.notice_format.day_string(day)
+            inspect_require(self.db.execute("SELECT 1 FROM requests WHERE id=?", (owner,)).fetchone() is not None)
+            owners.setdefault(day, set()).add(owner)
+        for key in meta:
+            if key.startswith("notice_edition_date:"):
+                inspect_require("notice_edition:" + key.split(":", 1)[1] in meta)
+        for day, ids in owners.items():
+            key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], day])
+            inspect_require(meta.get(key) in ids)
+            expected_days[key] = meta[key]
+        inspect_require({k: v for k, v in meta.items() if k.startswith("notice_day:")} == expected_days
+                        and report_date not in owners)
+        for table in ("parts", "image_parts"):
+            inspect_require(self.db.execute("SELECT 1 FROM " + table + " p LEFT JOIN requests r ON r.id=p.request_id WHERE r.id IS NULL LIMIT 1").fetchone() is None)
+        inspect_require(self.db.execute("SELECT 1 FROM requests r WHERE r.mode!='scheduled' AND (r.status IN ('sending','unknown') OR EXISTS(SELECT 1 FROM parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown')) OR EXISTS(SELECT 1 FROM image_parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown'))) LIMIT 1").fetchone() is None)
+        inspect_require(self.db.execute("SELECT 1 FROM requests r LEFT JOIN scheduled_notices q ON q.request_id=r.id WHERE r.mode='scheduled' AND q.request_id IS NULL LIMIT 1").fetchone() is None)
+        for rid, day, encoded in self._inspection_rows("SELECT request_id,report_date,record FROM scheduled_notices"):
+            record = json.loads(encoded, object_pairs_hook=relay.notice_format._unique_object)
+            inspection_identity(rid, day)
+            inspect_require(record.get("report_request_id") == rid and record.get("report_date") == day and canonical(record) == encoded)
+            original = self.db.execute("SELECT mode,intent_hash,status FROM requests WHERE id=?", (rid,)).fetchone()
+            inspect_require(original is not None and original[:2] == ("scheduled", relay.digest(record)))
+            day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], day])
+            owner = meta.get(day_key)
+            if owner is not None and owner != rid:
+                self._inspect_completed_handoff(rid, day, owner, meta)
+            else:
+                self._inspect_claim(rid, day, record["notice_key"], meta)
+            # 原定时未知结果可隔离，但必须仍有完整且一致的原绑定。
+            uncertain_parts = self.db.execute("SELECT 1 FROM parts WHERE request_id=? AND status IN ('sending','unknown') UNION SELECT 1 FROM image_parts WHERE request_id=? AND status IN ('sending','unknown') LIMIT 1", (rid, rid)).fetchone()
+            if original[2] in {"sending", "unknown"} or uncertain_parts:
+                self._inspect_bound(rid, day, meta)
+
     def admit(self, request_id, bundle, commit):
         if not isinstance(request_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", request_id):
             raise ScheduledDeliveryError("Bounded request ID required")
@@ -192,7 +383,10 @@ class ScheduledDelivery:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             job = self.db.execute("SELECT phase,owner,lease_until FROM scheduled_notices WHERE request_id=?", (request_id,)).fetchone()
-            if job is None or job[:2] != ("verifying",self.owner) or not started <= self.clock() < min(started+60,job[2]):
+            if job is None or job[:2] != ("verifying",self.owner):
+                return self.status(request_id)
+            if not started <= self.clock() < min(started+60,job[2]):
+                self._defer_locked(request_id, "verifying", "verification_expired")
                 return self.status(request_id)
             if self.clock() < float(self.store.get("next_send", "0")):
                 self.db.execute("UPDATE scheduled_notices SET phase='pending',next_at=? WHERE request_id=?", (float(self.store.get("next_send")), request_id))
@@ -253,8 +447,12 @@ class ScheduledDelivery:
     def _defer(self, request_id, phase="verifying", reason="publication_read_failed"):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            row = self.db.execute("SELECT attempts FROM scheduled_notices WHERE request_id=? AND phase=? AND owner=?",(request_id,phase,self.owner)).fetchone()
-            if row:
-                attempts = row[0]+1
-                delay = min(3600,15*(2**min(attempts-1,8)))
-                self.db.execute("UPDATE scheduled_notices SET phase='pending',attempts=?,next_at=?,last_error=? WHERE request_id=?",(attempts,self.clock()+delay,reason,request_id))
+            self._defer_locked(request_id, phase, reason)
+
+    def _defer_locked(self, request_id, phase, reason):
+        # 调用方持有 BEGIN IMMEDIATE，包括上面的验证时效门禁。
+        row = self.db.execute("SELECT attempts FROM scheduled_notices WHERE request_id=? AND phase=? AND owner=?",(request_id,phase,self.owner)).fetchone()
+        if row:
+            attempts = row[0]+1
+            delay = min(3600,15*(2**min(attempts-1,8)))
+            self.db.execute("UPDATE scheduled_notices SET phase='pending',attempts=?,next_at=?,last_error=? WHERE request_id=?",(attempts,self.clock()+delay,reason,request_id))

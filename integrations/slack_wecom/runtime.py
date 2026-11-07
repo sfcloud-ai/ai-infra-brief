@@ -18,6 +18,7 @@ import time
 from types import SimpleNamespace
 
 SCHEDULER_DRAIN_VERSION = 1
+SCHEDULED_ONLY_VERSION = 1
 
 if __package__:
     from . import resume as resume_adapter
@@ -116,14 +117,44 @@ def check_state(module, root):
     print('{"state_reconciled":true,"messages_sent":0}')
 
 
+def automatic_delivery_policy(store, config, scheduled_options, *, bind_mode=False):
+    """显式单路切换须先排空；锁定后不得通过删配置恢复历史自动发送。"""
+    mode = (scheduled_options or {}).get("automatic_delivery", "legacy")
+    saved = store.get("automatic_delivery_scope_v1")
+    if mode == "legacy":
+        if saved is not None:
+            raise ValueError("scheduled_only_mode_requires_reconciliation")
+        return mode
+    if mode != "scheduled_only":
+        raise ValueError("explicit_scheduled_only_mode_required")
+    expected = json.dumps({"mode": mode, "identity": binding(config),
+                           "activation_date": scheduled_options["activation_date"]},
+                          sort_keys=True, separators=(",", ":"))
+    if saved is not None and saved != expected:
+        raise ValueError("automatic_delivery_scope_changed")
+    if bind_mode and saved is None:
+        with store.db:
+            store.db.execute("BEGIN IMMEDIATE")
+            # 模式切换不能认领旧原生或定时路径的未决意图。
+            # 保留所有请求、分片回执与游标，不自动改写历史状态。
+            assert_reconciled(store)
+            store.db.execute("INSERT INTO meta VALUES (?,?)", ("automatic_delivery_scope_v1", expected))
+    return mode
+
+
 class ControlledRelay:
-    def __init__(self, module, receiver, release, activation_file=None, scheduled=None):
+    def __init__(self, module, receiver, release, activation_file=None, scheduled=None,
+                 automatic_delivery="legacy"):
+        if automatic_delivery not in ("legacy", "scheduled_only") or (automatic_delivery == "scheduled_only" and scheduled is None):
+            raise ValueError("scheduled_only_runtime_required")
+        self.automatic_delivery = automatic_delivery
         self.activation_file = activation_file
         self.scheduled = scheduled
         self.revoked_nonce = None
         self.module, self.receiver, self.release = module, receiver, release
         self.phase = "paused"
         self.polls = 0
+        self.scheduled_ticks = 0
 
     def reconciled(self):
         if self.scheduled is None:
@@ -133,7 +164,8 @@ class ControlledRelay:
 
     def ready(self):
         self.reconciled()
-        self.receiver.slack.newer(self.receiver.store.get("cursor"))
+        if self.automatic_delivery != "scheduled_only":
+            self.receiver.slack.newer(self.receiver.store.get("cursor"))
 
     def deadline(self, payload):
         deadline = payload.get("deadline")
@@ -190,6 +222,7 @@ class ControlledRelay:
                 # readiness 可以等待网络；返回后再次确认调用期限和 root 授权。
                 self.authorized(payload)
                 self.polls = 0
+                self.scheduled_ticks = 0
                 self.phase = "active"
             elif operation != "status":
                 raise self.module.RelayError("not_found", 404)
@@ -210,13 +243,18 @@ class ControlledRelay:
                     delivery_ready = False
             return {"release": self.release, "phase": self.phase, "in_flight": False,
                     "reconciled": reconciled, "delivery_ready": delivery_ready,
-                    "successful_polls": self.polls}
+                    "successful_polls": self.polls,
+                    "successful_scheduled_ticks": self.scheduled_ticks,
+                    "automatic_delivery": self.automatic_delivery}
         if self.phase != "active" and path != "/status":
             raise self.module.RelayError("delivery_paused", 409)
         if path == "/status":
             return self.receiver.dispatch(path, payload, uid)
         try:
             self.reconciled()
+            if self.automatic_delivery == "scheduled_only" and path == "/manual/slack-message":
+                # 验证发生在原回执和意图校验之后，首次外部读取之前。
+                return self.receiver.dispatch(path, payload, uid, verify_slack=True)
             return self.receiver.dispatch(path, payload, uid)
         finally:
             # 手动投递也共享账本；未知回执不能等到下一次轮询才阻断发送。
@@ -226,7 +264,7 @@ class ControlledRelay:
                 self.phase = "paused"
 
     def poll(self):
-        if self.phase == "active":
+        if self.phase == "active" and self.automatic_delivery != "scheduled_only":
             try:
                 self.reconciled()
                 processed = self.receiver.poll()
@@ -246,6 +284,7 @@ class ControlledRelay:
                 self.reconciled()
                 result = self.scheduled.queue.tick()
                 self.reconciled()
+                self.scheduled_ticks += 1
                 return result
             except Exception:
                 self.phase = "paused"
@@ -276,7 +315,8 @@ def run_loop(controller, server, config, stopping, scheduled_server=None):
                 print('{"event":"delivery_paused_requires_reconcile"}', flush=True)
                 continue
             next_tick = time.monotonic() + 0.25
-        if controller.phase == "active" and time.monotonic() >= next_poll:
+        if (controller.phase == "active" and controller.automatic_delivery != "scheduled_only"
+                and time.monotonic() >= next_poll):
             try:
                 processed = controller.poll()
             except RetryableReadError as error:
@@ -303,18 +343,21 @@ def serve(module, root, release, activation_file=None, scheduler_config=None):
     with module.exclusive(root):
         credentials = module.load_secrets(root)
         slack = module.Slack(credentials["slack_user_token"], config)
-        slack.verify()
         store = module.Store(root / "state")
         scheduled = None
         try:
+            mode = automatic_delivery_policy(store, config, scheduled_options)
+            if mode != "scheduled_only":
+                slack.verify()
             if scheduled_options is None:
                 assert_reconciled(store)
             receiver = resume_class(module)(store, slack, module.WeCom(credentials["wecom_webhook"]), config)
             receiver.baseline()
             if scheduled_options is not None:
                 scheduled = ScheduledRuntime(scheduled_options, store, config, receiver.wecom)
-            controller = ControlledRelay(module, receiver, release, activation_file, scheduled)
+            controller = ControlledRelay(module, receiver, release, activation_file, scheduled, mode)
             controller.ready()
+            automatic_delivery_policy(store, config, scheduled_options, bind_mode=True)
             if activation_file and activation_file.exists():
                 info = activation_file.lstat()
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0

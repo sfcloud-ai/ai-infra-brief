@@ -67,8 +67,10 @@ def load_config(path):
         return result
 
     value = json.loads(data, object_pairs_hook=unique)
-    if not isinstance(value, dict) or set(value) != FIELDS:
+    if not isinstance(value, dict) or set(value) not in (FIELDS, FIELDS | {"automatic_delivery"}):
         raise ValueError("exact_scheduler_config_required")
+    if "automatic_delivery" in value and value["automatic_delivery"] != "scheduled_only":
+        raise ValueError("explicit_scheduled_only_mode_required")
     if (sys.platform != "linux" or os.getuid() <= 0
             or type(value["publisher_uid"]) is not int
             or value["publisher_uid"] <= 0 or value["publisher_uid"] == os.getuid()):

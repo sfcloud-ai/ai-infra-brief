@@ -6,8 +6,10 @@ import json
 
 if __package__:
     from .notice_socket import peer_uid, bounded_read
+    from .scheduled_delivery import inspection_identity
 else:
     from notice_socket import peer_uid, bounded_read
+    from scheduled_delivery import inspection_identity
 
 MAX_REQUEST = 12*1024*1024
 
@@ -23,6 +25,9 @@ def dispatch(data, queue, can_admit=lambda: True):
         return value
     request=json.loads(data.decode("utf-8"),object_pairs_hook=unique)
     if not isinstance(request,dict):raise ValueError("Exact request object required")
+    if set(request)=={"action","request_id","report_date"} and request["action"]=="inspect":
+        inspection_identity(request["request_id"], request["report_date"])
+        return queue.inspect(request["request_id"], request["report_date"])
     if set(request)=={"action","request_id"} and request["action"]=="status":
         if not isinstance(request["request_id"],str) or len(request["request_id"])>80:
             raise ValueError("Bounded original request ID required")

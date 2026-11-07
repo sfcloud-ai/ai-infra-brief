@@ -67,6 +67,14 @@ class SchedulerConfigurationTests(unittest.TestCase):
             self.assertIn('type=bind,src=' + str(path) + ',dst=' + str(path) + ',readonly', mounts)
         self.assertTrue(all(v.endswith(',readonly') for v in second.mounts(True)[1::2]))
 
+    def test_scheduled_only_is_explicit_and_changes_deployment_binding(self):
+        original = self.load()
+        selected = self.load({**self.value, 'automatic_delivery': 'scheduled_only'})
+        self.assertNotEqual(original.binding, selected.binding)
+        for mode in (None, True, 'legacy', 'scheduled-only', ''):
+            with self.subTest(mode=mode), self.assertRaisesRegex(ValueError, 'scheduled_only_mode'):
+                self.load({**self.value, 'automatic_delivery': mode})
+
     def test_rejects_external_paths_fields_uid_date_and_config_duplicates(self):
         changes = [{'destination': 'other'}, {'publisher_uid': os.getuid()}, {'publisher_uid': True},
                    {'publisher_uid': 0}, {'activation_date': '2026-02-30'},
@@ -120,6 +128,7 @@ class SchedulerConfigurationTests(unittest.TestCase):
         self.assertNotIn('dst=/relay', ' '.join(args))
         self.assertTrue(all(arg.endswith(',readonly') for arg in args if arg.startswith('type=bind')))
         self.assertIn('scheduler_config', args[args.index('-c') + 1])
+        self.assertIn('SCHEDULED_ONLY_VERSION', args[args.index('-c') + 1])
         self.assertIn('await import', args[args.index('-c') + 1])
         name = args[args.index('--name') + 1]
         self.assertEqual(driver.command.call_args_list[-1].args[0], ['rm', '-f', name])

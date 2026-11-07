@@ -312,9 +312,13 @@ class DockerDriver:
             try:
                 status = self.status(release, deadline=deadline)
                 readiness = "delivery_ready" if active and getattr(self, "scheduler", None) is not None else "reconciled"
+                scheduled_only = (getattr(self, "scheduler", None) is not None
+                                  and self.scheduler.value.get("automatic_delivery") == "scheduled_only")
+                counter = "successful_scheduled_ticks" if scheduled_only else "successful_polls"
                 if (status.get("phase") == ("active" if active else "paused")
                         and status.get(readiness) is True and status.get("in_flight") is False
-                        and (not active or status.get("successful_polls", 0) >= 1)):
+                        and (not scheduled_only or status.get("automatic_delivery") == "scheduled_only")
+                        and (not active or status.get(counter, 0) >= 1)):
                     return
             except (ServiceError, ValueError, subprocess.TimeoutExpired):
                 pass

@@ -77,7 +77,20 @@ class ScheduledTests(unittest.TestCase):
     def test_expired_verification_cannot_send(self):
         self.admit()
         def slow(b,c):self.now[0]+=61;return copy.deepcopy(self.plan)
-        self.q.verify=slow;self.q.tick();self.assertEqual(self.calls,[])
+        self.q.verify=slow
+        for attempt in range(1,4):
+            result=self.q.tick()
+            self.assertEqual(self.calls,[])
+            self.assertEqual(result["phase"],"pending")
+            self.assertEqual(result["attempts"],attempt)
+            self.assertEqual(result["last_error"],"verification_expired")
+            self.assertEqual(result["next_attempt_at"],self.now[0]+15*(2**(attempt-1)))
+            self.assertIsNone(self.q.tick())
+            self.now[0]=result["next_attempt_at"]
+        self.q.verify=lambda b,c:copy.deepcopy(self.plan)
+        self.q.tick();self.advance()
+        self.assertEqual(self.q.status("isolated-bundle-fixture")["status"],"sent")
+        self.assertEqual([kind for kind,_ in self.calls],["text","image"])
     def test_restart_after_known_success_does_not_repeat_text(self):
         self.admit();self.q.tick();self.store.db.close();self.store=relay.Store(Path(self.tmp.name));self.q=self.queue();self.advance();self.advance();result=self.q.status("isolated-bundle-fixture")
         self.assertEqual(result["status"],"sent");self.assertEqual([k for k,_ in self.calls],["text","image"])
