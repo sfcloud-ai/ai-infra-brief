@@ -84,6 +84,16 @@ def stage(config, commit, checksum, protected):
 
 def execute(command, config, control_root, stage_runner=stage, driver_factory=DockerDriver):
     policy = Policy(control_root)
+    if __package__:
+        from .mode_transition import migrate, guard
+    else:
+        from mode_transition import migrate, guard
+    if command[0] == "scheduled-only":
+        if not config.get("live_enabled"):
+            raise ValueError("production_disabled")
+        return migrate(command, config, control_root, policy, driver_factory)
+    if command != ("status",):
+        guard(control_root)
     if command == ("status",):
         return {"sequence": policy.value["sequence"], "active": policy.value["active"],
                 "previous": policy.value["previous"], "receiver_format": RECEIVER_FORMAT}
@@ -122,7 +132,8 @@ def main():
         raise ValueError("restricted_helper_only")
     command = parse_command(" ".join(sys.argv[1:]))
     for path in (CONFIG, CONTROLLER, CODE_ROOT / "policy.py", CODE_ROOT / "supervisor.py",
-                 CODE_ROOT / "notice_service.py", CODE_ROOT / "scheduler_service.py", CODE_ROOT / "ssh_entry.py"):
+                 CODE_ROOT / "notice_service.py", CODE_ROOT / "scheduler_service.py", CODE_ROOT / "ssh_entry.py",
+                 CODE_ROOT / "mode_transition.py", CODE_ROOT / "control_entry.py"):
         root_owned_file(path)
     config = json.loads(CONFIG.read_text())
     # 即使是 status/rollback，也验证固定配置，不能让未验证路径进入 Docker。

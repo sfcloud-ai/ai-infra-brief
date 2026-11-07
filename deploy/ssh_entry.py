@@ -13,6 +13,8 @@ def parse_command(command):
     if not match:
         match = re.fullmatch(r"(rollback) ([1-9][0-9]{0,17}) ([0-9a-f]{40}) ([0-9a-f]{40})", command)
     if not match:
+        match = re.fullmatch(r"(scheduled-only) ([1-9][0-9]{0,17}) ([0-9a-f]{40}) ([0-9a-f]{64})", command)
+    if not match:
         raise ValueError("unsupported_deployment_command")
     return match.groups()
 

@@ -91,10 +91,13 @@ class SchedulerDeployment:
                 files[path.relative_to(self.verifier).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
         self.value = value
         self.uid, self.gid = uid, gid
-        self.binding = hashlib.sha256(json.dumps({
-            'config': value, 'uid': uid, 'gid': gid,
-            'node_sha256': hashlib.sha256(NODE.read_bytes()).hexdigest(), 'files': files,
-        }, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.identity = {'uid': uid, 'gid': gid,
+                         'node_sha256': hashlib.sha256(NODE.read_bytes()).hexdigest(), 'files': files}
+        self.binding = self.binding_for(value)
+
+    def binding_for(self, value):
+        return hashlib.sha256(json.dumps({'config': value, **self.identity},
+                             sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def mounts(self, readonly_ipc=False):
         values = [(CONFIG, True), (NODE, True), (self.verifier, True), (IPC, readonly_ipc)]
@@ -107,7 +110,7 @@ class SchedulerDeployment:
     def serve_args(self):
         return ['--scheduler-config', str(CONFIG)]
 
-    def preflight(self, driver, release):
+    def preflight(self, driver, release, require_scheduled_only=False):
         """无网络、无账本和凭据挂载，先验证候选及回滚版本能加载固定依赖。"""
         code = driver.code(release)
         if code == '/legacy':
@@ -119,6 +122,8 @@ class SchedulerDeployment:
             'import runtime,scheduled_runtime,scheduled_delivery,scheduled_socket; '
             'assert "scheduler_config" in inspect.signature(runtime.serve).parameters; '
             'assert runtime.SCHEDULER_DRAIN_VERSION==1; '
+            + ('assert getattr(runtime,"SCHEDULED_ONLY_VERSION",0)==1; ' if require_scheduled_only else '')
+            +
             'assert "can_admit" in inspect.signature(scheduled_runtime.ScheduledRuntime.open).parameters; '
             'c=scheduled_runtime.load_config(Path(sys.argv[2])); '
             'assert c.get("automatic_delivery")!="scheduled_only" or getattr(runtime,"SCHEDULED_ONLY_VERSION",0)==1; '
