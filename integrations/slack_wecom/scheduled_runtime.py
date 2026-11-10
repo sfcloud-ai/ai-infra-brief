@@ -14,12 +14,12 @@ import sys
 
 if __package__:
     from . import relay
-    from .scheduled_delivery import ScheduledDelivery, canonical, validate_plan
+    from .scheduled_delivery import ScheduledDelivery, canonical, validate_plan, scheduled_notice_day
     from .scheduled_socket import handle
     from .scheduled_verifier import NodePublicationVerifier
 else:
     import relay
-    from scheduled_delivery import ScheduledDelivery, canonical, validate_plan
+    from scheduled_delivery import ScheduledDelivery, canonical, validate_plan, scheduled_notice_day
     from scheduled_socket import handle
     from scheduled_verifier import NodePublicationVerifier
 
@@ -158,7 +158,7 @@ class ScheduledRuntime:
                 record = json.loads(row[4])
                 checked, _, due = validate_plan({**record, "poster": row[6]}, row[5], record["report_commit"])
                 profile = relay.validate_notice_connector(self.queue.config["notice_connector"])
-                day = relay.notice_url_day(record["notice_key"], profile)
+                day = scheduled_notice_day(record["notice_key"], profile)
                 edition = relay.digest([self.queue.config["team_id"], self.queue.config["channel_id"], record["notice_key"]])
                 day_key = relay.digest([self.queue.config["team_id"], self.queue.config["channel_id"], day])
                 if (canonical(checked) != row[4] or relay.digest(checked) != row[2]

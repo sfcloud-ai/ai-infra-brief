@@ -40,6 +40,15 @@ def inspect_require(condition):
         raise ScheduledDeliveryError("Scheduled inspection requires reconciliation")
 
 
+def scheduled_notice_day(url, profile):
+    """仅定时链路接受稳定日期键；旧原生连接器继续使用原版次契约。"""
+    if isinstance(url, str):
+        match = re.fullmatch(re.escape(profile["report_base_url"]) + r"(\d{4}-\d{2}-\d{2})/", url)
+        if match:
+            return relay.notice_format.day_string(match[1])
+    return relay.notice_url_day(url, profile)
+
+
 def validate_plan(plan, bundle, commit):
     fields = {"report_request_id", "report_date", "report_commit", "bundle_sha256", "notice_key", "text", "poster", "poster_sha256", "mime"}
     if not isinstance(plan, dict) or set(plan) != fields:
@@ -90,7 +99,7 @@ def reconcile_daily_claims(store, config, verifier, snapshots):
     mapped=[]
     for bundle,commit in snapshots:
         record,_,_=validate_plan(verifier(bundle,commit),bundle,commit)
-        day=relay.notice_url_day(record["notice_key"],relay.validate_notice_connector(config["notice_connector"]))
+        day=scheduled_notice_day(record["notice_key"],relay.validate_notice_connector(config["notice_connector"]))
         if day != record["report_date"]:raise ScheduledDeliveryError("Historical date differs")
         suffix=relay.digest([config["team_id"],config["channel_id"],record["notice_key"]])
         mapped.append((suffix,day))
@@ -183,7 +192,7 @@ class ScheduledDelivery:
         inspect_require(canonical(checked) == encoded and record["report_request_id"] == request_id
                         and record["report_date"] == report_date and due == expected_due)
         base = relay.validate_notice_connector(self.config["notice_connector"])["report_base_url"]
-        inspect_require(relay.notice_url_day(record["notice_key"], self.config["notice_connector"]) == report_date)
+        inspect_require(scheduled_notice_day(record["notice_key"], self.config["notice_connector"]) == report_date)
         source = json.loads(bundle.decode("utf-8"), object_pairs_hook=relay.notice_format._unique_object)
         inspect_require(source.get("request_id") == request_id and isinstance(source.get("files"), list))
         metadata = [item for item in source["files"] if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].endswith("/report.json")]
@@ -194,7 +203,8 @@ class ScheduledDelivery:
         inspect_require(type(revision) in (int, float) and math.isfinite(revision)
                         and 0 < revision <= 9007199254740991 and int(revision) == revision)
         manifest = relay.notice_format.build_manifest({**report, "revision": int(revision)}, base,
-                                                      hashlib.sha256(report_bytes).hexdigest(), record["report_commit"])
+                                                      hashlib.sha256(report_bytes).hexdigest(), record["report_commit"],
+                                                      stable=record["notice_key"] == f"{base}{report_date}/")
         inspect_require(manifest["index_url"] == record["notice_key"] and manifest["text"] == record["text"]
                         and manifest["poster"]["sha256"] == record["poster_sha256"]
                         and relay.notice_format.bundle_poster(bundle, manifest, base) == poster)
@@ -329,7 +339,7 @@ class ScheduledDelivery:
             raise ScheduledDeliveryError("Historical reports require separate reconciliation")
         if record["report_request_id"] != request_id:
             raise ScheduledDeliveryError("Original bundle request differs")
-        day = relay.notice_url_day(record["notice_key"], relay.validate_notice_connector(self.config["notice_connector"]))
+        day = scheduled_notice_day(record["notice_key"], relay.validate_notice_connector(self.config["notice_connector"]))
         if day != record["report_date"]:
             raise ScheduledDeliveryError("Notice date differs")
         pieces = relay.chunks(record["text"])
