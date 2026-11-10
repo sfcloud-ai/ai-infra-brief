@@ -7,7 +7,8 @@
     "schema_version": {
       "enum": [
         "1.0",
-        "1.1"
+        "1.1",
+        "1.2"
       ]
     },
     "date": {
@@ -568,7 +569,8 @@
             "enum": [
               "ok",
               "failed",
-              "timeout"
+              "timeout",
+              "partial"
             ]
           },
           "attempts": {
@@ -634,6 +636,9 @@
             "minLength": 1,
             "maxLength": 2000,
             "pattern": "\\S"
+          },
+          "partial_reason": {
+            "const": "coverage_incomplete"
           }
         },
         "required": [
@@ -666,6 +671,38 @@
             "required": [
               "timing_unavailable_reason"
             ]
+          }
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "const": "partial"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "stage": {
+                  "const": "research"
+                },
+                "error": {
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "partial_reason"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "partial_reason"
+                ]
+              }
+            }
           }
         ]
       },
@@ -709,6 +746,52 @@
     },
     "scope": {
       "const": "new_daily"
+    },
+    "coverage_policy": {
+      "enum": [
+        "strict",
+        "publish_verified_with_gaps"
+      ]
+    },
+    "coverage_notice": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "checks": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "vllm",
+                  "sglang",
+                  "deepinfer",
+                  "vllm_blog",
+                  "sglang_blog",
+                  "deepseek_articles",
+                  "deepinfer_articles"
+                ]
+              },
+              "minItems": 1,
+              "maxItems": 7,
+              "uniqueItems": true
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 180,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "checks",
+            "text"
+          ]
+        }
+      ]
     }
   },
   "required": [
@@ -763,6 +846,52 @@
                 "required": [
                   "timing_unavailable_reason"
                 ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "1.2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "coverage_policy",
+          "coverage_notice"
+        ]
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "coverage_policy"
+              ]
+            },
+            {
+              "required": [
+                "coverage_notice"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "model_calls": {
+            "items": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "ok",
+                    "failed",
+                    "timeout"
+                  ]
+                }
               }
             }
           }

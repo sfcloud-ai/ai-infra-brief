@@ -178,6 +178,13 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(recovered["readiness"], "ready")
             self.assertTrue(recovered["budget_unknown"])
             self.assertEqual(recovered["warnings"], [{"code": "timing_unavailable", "path": "sources[0].elapsed_seconds"}])
+            fixture.partial_coverage()
+            fixture.save()
+            partial = json.loads(self.checked([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)], self.outside))
+            self.assertEqual(partial["readiness"], "partial")
+            self.assertEqual(partial["coverage_incomplete"], ["vllm"])
+            self.assertTrue(partial["budget_unknown"])
+            self.assertFalse(partial["delivery_allowed"])
             fixture.candidate["source_type"] = "secondary"
             fixture.save()
             invalid = subprocess.run([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)],
