@@ -85,6 +85,110 @@ class ResearchAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(BriefError, pattern):
             self.check()
 
+    def missing_timing(self, record):
+        record.update(elapsed_seconds=None, timing_unavailable_reason="合成中断：原计时记录丢失，不能恢复真实累计值")
+
+    def test_v11_retains_successful_evidence_with_honest_timing_warnings(self):
+        self.audit["schema_version"] = "1.1"
+        self.missing_timing(self.audit["sources"][0])
+        self.missing_timing(self.audit["model_calls"][0])
+        self.save()
+        before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        result = validate_audit(self.root)
+        self.assertEqual(result["schema_version"], "1.1")
+        self.assertEqual(result["readiness"], "ready")
+        self.assertTrue(result["budget_unknown"])
+        self.assertEqual(result["warnings"], [
+            {"code": "timing_unavailable", "path": "sources[0].elapsed_seconds"},
+            {"code": "timing_unavailable", "path": "model_calls[0].elapsed_seconds"},
+        ])
+        self.assertFalse(result["delivery_allowed"])
+        self.assertNotIn("合成中断", json.dumps(result, ensure_ascii=False))
+        self.assertEqual(before, {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+
+    def test_v10_does_not_silently_adopt_unknown_timing_policy(self):
+        for collection in ("sources", "model_calls"):
+            with self.subTest(collection=collection):
+                record = self.audit[collection][0]
+                elapsed = record["elapsed_seconds"]
+                self.missing_timing(record)
+                self.reject("Invalid research-audit metadata schema")
+                record["elapsed_seconds"] = elapsed
+                record.pop("timing_unavailable_reason")
+
+    def test_v11_unknown_timing_requires_reason_and_preserves_required_fields(self):
+        self.audit["schema_version"] = "1.1"
+        for collection in ("sources", "model_calls"):
+            record = self.audit[collection][0]
+            elapsed = record["elapsed_seconds"]
+            record["elapsed_seconds"] = None
+            self.reject("Invalid research-audit metadata schema")
+            for reason in ("", " ", "x" * 2001, None):
+                record["timing_unavailable_reason"] = reason
+                self.reject("Invalid research-audit metadata schema")
+            self.missing_timing(record)
+            record.pop("elapsed_seconds")
+            self.reject("Invalid research-audit metadata schema")
+            record["elapsed_seconds"] = elapsed
+            self.reject("Invalid research-audit metadata schema")
+            record.pop("timing_unavailable_reason")
+        result = self.check()
+        self.assertEqual(result["warnings"], [])
+        self.assertFalse(result["budget_unknown"])
+
+    def test_v11_unknown_timing_does_not_hide_attempt_or_known_budget_exhaustion(self):
+        self.audit["schema_version"] = "1.1"
+        for collection, kind in (("sources", "source"), ("model_calls", "model")):
+            record = self.audit[collection][0]
+            original = dict(record)
+            self.missing_timing(record)
+            record["attempts"] = self.audit["limits"][f"{kind}_attempts"] + 1
+            self.assertIn(f"{kind}_budget_exceeded", self.check()["blockers"])
+            record.clear()
+            record.update(original, elapsed_seconds=121)
+            self.assertIn(f"{kind}_budget_exceeded", self.check()["blockers"])
+            record.clear()
+            record.update(original)
+        self.missing_timing(self.audit["sources"][0])
+        self.audit["limits"]["run_seconds"] = 1
+        self.assertIn("run_budget_exceeded", self.check()["blockers"])
+
+    def test_v11_unknown_timing_does_not_approve_incomplete_or_false_research(self):
+        self.audit["schema_version"] = "1.1"
+        self.missing_timing(self.audit["sources"][0])
+        self.audit["checks"]["vllm"]["status"] = "failed"
+        self.assertIn("required_coverage_incomplete", self.check()["blockers"])
+        self.audit["checks"]["vllm"]["status"] = "checked"
+        self.missing_timing(self.audit["model_calls"][0])
+        self.audit["model_calls"][0].update(status="failed", error="合成失败")
+        self.assertIn("model_stage_failed", self.check()["blockers"])
+        self.audit["model_calls"].pop(0)
+        self.assertIn("model_stage_missing", self.check()["blockers"])
+        self.root.joinpath("evidence/source.txt").write_text("不同的合成正文", encoding="utf-8")
+        self.reject("Source content fingerprint mismatch")
+
+    def test_v11_failed_optional_source_does_not_discard_completed_coverage(self):
+        self.audit["schema_version"] = "1.1"
+        failed = dict(self.audit["sources"][0], id="blocked", status="failed", content_sha256=None,
+                      error="合成代理连接拒绝；恢复读取中断，未取得正文", attempts=2)
+        self.missing_timing(failed)
+        self.audit["sources"].append(failed)
+        self.audit["checks"]["vllm"]["source_ids"].append("blocked")
+        self.assertEqual(self.check()["readiness"], "ready")
+        self.audit["decisions"][0]["source_ids"].append("blocked")
+        self.reject("Selected evidence contains a failed source")
+
+    def test_v11_cli_warns_without_claiming_budget_or_delivery_success(self):
+        self.audit["schema_version"] = "1.1"
+        self.missing_timing(self.audit["sources"][0])
+        self.save()
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["audit-research", str(self.root)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["budget_unknown"])
+        self.assertFalse(result["delivery_allowed"])
+
     def test_secondary_only_selected_or_updated_candidates_are_rejected(self):
         self.candidate["source_type"] = "secondary"
         self.reject("require primary source evidence")

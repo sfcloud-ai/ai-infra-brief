@@ -133,12 +133,27 @@ def _validate_audit(directory):
              "Audit date must match as_of in Asia/Shanghai")
     limits = metadata["limits"]
     blockers = []
+    warnings = []
     run_elapsed = (finished - started).total_seconds()
     if run_elapsed > limits["run_seconds"]:
         blockers.append("run_budget_exceeded")
 
+    def operation_budget(record, kind, index):
+        # 缺计时不等于零耗时，也不豁免真实尝试次数或已知的超限。
+        if record["attempts"] > limits[f"{kind}_attempts"]:
+            blockers.append(f"{kind}_budget_exceeded")
+        elapsed = record["elapsed_seconds"]
+        label = "Source" if kind == "source" else "Model"
+        if elapsed is None:
+            collection = "sources" if kind == "source" else "model_calls"
+            warnings.append({"code": "timing_unavailable", "path": f"{collection}[{index}].elapsed_seconds"})
+        else:
+            _require(elapsed <= run_elapsed, f"{label} duration exceeds recorded run interval")
+            if elapsed > limits["operation_seconds"]:
+                blockers.append(f"{kind}_budget_exceeded")
+
     sources, source_text = {}, {}
-    for source in metadata["sources"]:
+    for index, source in enumerate(metadata["sources"]):
         identity = source["id"]
         _require(identity not in sources, "Duplicate source ID")
         sources[identity] = source
@@ -147,9 +162,7 @@ def _validate_audit(directory):
         _require(started <= retrieved <= finished, "Source read time is outside this run")
         if source["published_at"] is not None:
             _require(_time(source["published_at"]) <= retrieved, "Source publication follows retrieval")
-        _require(source["elapsed_seconds"] <= run_elapsed, "Source duration exceeds recorded run interval")
-        if source["attempts"] > limits["source_attempts"] or source["elapsed_seconds"] > limits["operation_seconds"]:
-            blockers.append("source_budget_exceeded")
+        operation_budget(source, "source", index)
         if source["status"] == "ok":
             _require(source["content_sha256"] is not None and not source["error"], "Successful source needs content fingerprint and no error")
             content = read(f"evidence/{identity}.txt")
@@ -174,15 +187,13 @@ def _validate_audit(directory):
             blockers.append("required_coverage_incomplete")
 
     calls = {}
-    for call in metadata["model_calls"]:
+    for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
         model = call["model"]
         if model["name"] is None or model["version"] is None:
             _require(bool(model["unavailable_reason"].strip()), "Unavailable model identity needs an honest explanation")
-        _require(call["elapsed_seconds"] <= run_elapsed, "Model duration exceeds recorded run interval")
-        if call["attempts"] > limits["model_attempts"] or call["elapsed_seconds"] > limits["operation_seconds"]:
-            blockers.append("model_budget_exceeded")
+        operation_budget(call, "model", index)
         if call["status"] == "ok":
             _require(not call["error"], "Successful model stage cannot contain an error")
         else:
@@ -263,7 +274,11 @@ def _validate_audit(directory):
                 _require(entry.get("update_of") is None, "Draft cannot introduce an unaudited update relationship")
         _require(set(entries) == selected | status_entries.keys(), "Draft must contain every selected event and coverage status exactly once")
 
-    return {"schema_version": "1.0", "date": metadata["date"], "audit_valid": True,
+    result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
             "readiness": "blocked" if blockers else ("ready" if selected else "zero_items"),
             "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": len(selected),
             "status_entry_count": len(status_entries), "delivery_allowed": False}
+    if metadata["schema_version"] == "1.1":
+        # 摘要只含固定字段路径，不回显私有解释、来源地址或正文。
+        result.update(warnings=warnings, budget_unknown=bool(warnings))
+    return result

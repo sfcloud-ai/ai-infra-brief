@@ -171,6 +171,13 @@ class PackagingTests(unittest.TestCase):
             result = json.loads(output)
             self.assertEqual(result["readiness"], "ready")
             self.assertFalse(result["delivery_allowed"])
+            fixture.audit["schema_version"] = "1.1"
+            fixture.missing_timing(fixture.audit["sources"][0])
+            fixture.save()
+            recovered = json.loads(self.checked([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)], self.outside))
+            self.assertEqual(recovered["readiness"], "ready")
+            self.assertTrue(recovered["budget_unknown"])
+            self.assertEqual(recovered["warnings"], [{"code": "timing_unavailable", "path": "sources[0].elapsed_seconds"}])
             fixture.candidate["source_type"] = "secondary"
             fixture.save()
             invalid = subprocess.run([str(self.venv / "bin/ai-brief"), "audit-research", str(fixture.root)],
