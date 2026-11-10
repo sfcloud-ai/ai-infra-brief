@@ -51,11 +51,12 @@ def base_url(base):
     return base
 
 
-def article_text(day, revision, articles, base):
+def article_text(day, revision, articles, base, *, stable=False):
     day_string(day)
     base_url(base)
     require(type(revision) is int and 0 < revision <= 9007199254740991 and isinstance(articles, list) and 0 < len(articles) <= 30)
-    root = f"{base}{day}/r{revision}/"
+    require(type(stable) is bool)
+    root = f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"
     lines = [f"AI Infra 晨报 · {day}"]
     seen = set()
     for number, article in enumerate(articles, 1):
@@ -71,12 +72,13 @@ def article_text(day, revision, articles, base):
     return text
 
 
-def build_manifest(report, base, report_hash, commit):
+def build_manifest(report, base, report_hash, commit, *, stable=False):
     require(isinstance(report, dict) and isinstance(commit, str) and SHA.fullmatch(commit)
             and isinstance(report_hash, str) and HASH.fullmatch(report_hash))
     day, revision = report.get("date"), report.get("revision")
-    text = article_text(day, revision, report.get("articles"), base)
-    root = f"{base}{day}/r{revision}/"
+    text = article_text(day, revision, report.get("articles"), base, stable=stable)
+    require(type(stable) is bool)
+    root = f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"
     articles = [{"id": a["id"], "title": a["title"], "url": root + a["id"] + "/"} for a in report["articles"]]
     poster = report.get("poster")
     require(isinstance(poster, str) and re.fullmatch(r"assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg)", poster))
@@ -86,7 +88,7 @@ def build_manifest(report, base, report_hash, commit):
     require(len(matches) == 1 and isinstance(matches[0].get("sha256"), str) and HASH.fullmatch(matches[0]["sha256"]))
     manifest = {"schema_version": "1.0", "commit": commit, "date": day, "revision": revision,
                 "index_url": root, "articles": articles, "text": text,
-                "poster": {"url": f"{base}reports/{day}/r{revision}/{poster}", "sha256": matches[0]["sha256"]},
+                "poster": {"url": (f"{base}reports/{day}/" if stable else f"{base}reports/{day}/r{revision}/") + poster, "sha256": matches[0]["sha256"]},
                 "report_sha256": report_hash}
     validate_manifest(manifest, base)
     return manifest
@@ -96,15 +98,17 @@ def validate_manifest(manifest, base):
     exact(manifest, ["schema_version", "commit", "date", "revision", "index_url", "articles", "text", "poster", "report_sha256"])
     require(manifest["schema_version"] == "1.0" and isinstance(manifest["commit"], str) and SHA.fullmatch(manifest["commit"])
             and isinstance(manifest["report_sha256"], str) and HASH.fullmatch(manifest["report_sha256"]))
-    expected = article_text(manifest["date"], manifest["revision"], manifest["articles"], base)
-    root = f"{base}{manifest['date']}/r{manifest['revision']}/"
+    stable = manifest["index_url"] == f"{base}{manifest['date']}/"
+    expected = article_text(manifest["date"], manifest["revision"], manifest["articles"], base, stable=stable)
+    root = f"{base}{manifest['date']}/" if stable else f"{base}{manifest['date']}/r{manifest['revision']}/"
     require(manifest["index_url"] == root and manifest["text"] == expected)
     for article in manifest["articles"]:
         exact(article, ["id", "title", "url"])
         require(article["url"] == root + article["id"] + "/")
     exact(manifest["poster"], ["url", "sha256"])
     poster = manifest["poster"]
-    require(isinstance(poster["url"], str) and re.fullmatch(re.escape(base + "reports/" + manifest["date"] + "/r" + str(manifest["revision"]) + "/") + r"assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg)", poster["url"])
+    asset_root = base + "reports/" + manifest["date"] + "/" + ("" if stable else "r" + str(manifest["revision"]) + "/")
+    require(isinstance(poster["url"], str) and re.fullmatch(re.escape(asset_root) + r"assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg)", poster["url"])
             and isinstance(poster["sha256"], str) and HASH.fullmatch(poster["sha256"]))
     require(len(json.dumps(manifest, ensure_ascii=False).encode("utf-8")) <= MAX_MANIFEST_BYTES)
     return manifest
@@ -162,7 +166,15 @@ def bundle_poster(data, manifest, base):
             and isinstance(value["request_id"], str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{7,79}", value["request_id"])
             and all(isinstance(value[k], str) and SHA.fullmatch(value[k]) for k in ("expected_base_sha", "prompt_commit_sha")))
     require(isinstance(value["files"], list) and 0 < len(value["files"]) <= 64)
-    root = f"reports/{manifest['date']}/r{manifest['revision']}/"
+    stable = manifest["index_url"] == f"{base}{manifest['date']}/"
+    legacy_root = f"reports/{manifest['date']}/r{manifest['revision']}/"
+    allowed_roots = {legacy_root, f"reports/{manifest['date']}/"} if stable else {legacy_root}
+    metadata_paths = [item.get("path") for item in value["files"]
+                      if isinstance(item, dict) and isinstance(item.get("path"), str)
+                      and item["path"].endswith("/report.json")]
+    require(len(metadata_paths) == 1)
+    root = metadata_paths[0][:-len("report.json")]
+    require(root in allowed_roots)
     files, total = {}, 0
     for item in value["files"]:
         exact(item, ["path", "sha256", "base64"])
@@ -185,7 +197,7 @@ def bundle_poster(data, manifest, base):
             and type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"]
             and isinstance(report["images"], list) and len(report["images"]) <= 20
             and build_manifest({**report, "revision": manifest["revision"]}, base,
-                               manifest["report_sha256"], manifest["commit"]) == manifest)
+                               manifest["report_sha256"], manifest["commit"], stable=stable) == manifest)
     used = {root + "report.json"}
     for article in report["articles"]:
         path = root + "articles/" + article["id"] + ".md"

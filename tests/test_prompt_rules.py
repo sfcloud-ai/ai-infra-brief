@@ -66,6 +66,26 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("delivery_allowed=false", audit)
         self.assertIn("不补造", audit)
 
+    def test_public_url_rules_keep_one_current_page_and_internal_identity(self):
+        for name in ("editor.md", "delivery.md"):
+            text = (PROMPTS / name).read_text(encoding="utf-8")
+            for term in ("每天只有一份当前网页", "/YYYY-MM-DD/", "/YYYY-MM-DD/<article-id>/",
+                         "不含 `/rN/`", "兼容跳转", "revision", "request_id", "发送账本",
+                         "不授予再次"):
+                self.assertIn(term, text, f"{name}: {term}")
+        delivery = (PROMPTS / "delivery.md").read_text(encoding="utf-8")
+        notice = re.search(r"```text\n(.*?)\n```", delivery, re.DOTALL).group(1)
+        links = re.findall(r"^https://[^\s]+$", notice, re.MULTILINE)
+        self.assertEqual(links, [
+            "https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/first-article/",
+            "https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/second-article/",
+        ])
+        self.assertNotIn("新 `rN` 是独立版次", delivery)
+        for term in ("noindex", "canonical", "不保留旧正文", "已移除文章跳到该日期总页",
+                     "证据读取禁止重定向", "历史原包及旧回执不改写", "未知写入仍禁止自动重发",
+                     "当前报告源/清单", "不是新稳定 URL 发布能力", "scheduled_delivery"):
+            self.assertIn(term, delivery)
+
     def test_source_catalog_has_unique_ids_and_required_coverage(self):
         text = (PROMPTS / "sources.md").read_text(encoding="utf-8")
         ids = re.findall(r"^\| `([a-z][a-z0-9_]*)` \|", text, re.MULTILINE)
