@@ -5,7 +5,10 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "1.0"
+      "enum": [
+        "1.0",
+        "1.1"
+      ]
     },
     "date": {
       "type": "string",
@@ -165,7 +168,10 @@
             "maximum": 10000
           },
           "elapsed_seconds": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0,
             "maximum": 86400
           },
@@ -198,6 +204,12 @@
           "error": {
             "type": "string",
             "maxLength": 2000
+          },
+          "timing_unavailable_reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "pattern": "\\S"
           }
         },
         "required": [
@@ -210,6 +222,30 @@
           "published_at",
           "content_sha256",
           "error"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "elapsed_seconds": {
+                "type": "number"
+              }
+            },
+            "not": {
+              "required": [
+                "timing_unavailable_reason"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "elapsed_seconds": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "timing_unavailable_reason"
+            ]
+          }
         ]
       },
       "maxItems": 500
@@ -541,7 +577,10 @@
             "maximum": 10000
           },
           "elapsed_seconds": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "minimum": 0,
             "maximum": 86400
           },
@@ -589,6 +628,12 @@
           "error": {
             "type": "string",
             "maxLength": 2000
+          },
+          "timing_unavailable_reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "pattern": "\\S"
           }
         },
         "required": [
@@ -598,6 +643,30 @@
           "elapsed_seconds",
           "model",
           "error"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "elapsed_seconds": {
+                "type": "number"
+              }
+            },
+            "not": {
+              "required": [
+                "timing_unavailable_reason"
+              ]
+            }
+          },
+          {
+            "properties": {
+              "elapsed_seconds": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "timing_unavailable_reason"
+            ]
+          }
         ]
       },
       "maxItems": 2
@@ -657,5 +726,48 @@
     "model_calls",
     "status_entries",
     "scope"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "1.0"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sources": {
+            "items": {
+              "properties": {
+                "elapsed_seconds": {
+                  "type": "number"
+                }
+              },
+              "not": {
+                "required": [
+                  "timing_unavailable_reason"
+                ]
+              }
+            }
+          },
+          "model_calls": {
+            "items": {
+              "properties": {
+                "elapsed_seconds": {
+                  "type": "number"
+                }
+              },
+              "not": {
+                "required": [
+                  "timing_unavailable_reason"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
   ]
 }
