@@ -14,6 +14,11 @@ from .storage import BriefError
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
 SELECTED = {"selected", "update"}
+COVERAGE_LABELS = {
+    "vllm": "vLLM 代码", "sglang": "SGLang 代码", "deepinfer": "DeepInfer 代码",
+    "vllm_blog": "vLLM 博客", "sglang_blog": "SGLang 博客",
+    "deepseek_articles": "DeepSeek 文章", "deepinfer_articles": "DeepInfer 文章",
+}
 
 
 def _json(data, label):
@@ -181,12 +186,18 @@ def _validate_audit(directory):
         _require(len(ids) == len(set(ids)) and all(i in sources for i in ids), "Source references must be unique and known")
         return [sources[i] for i in ids]
 
-    for check in metadata["checks"].values():
+    allow_partial = metadata.get("coverage_policy") == "publish_verified_with_gaps"
+    coverage_gaps = []
+    for name, check in metadata["checks"].items():
         linked = references(check["source_ids"])
         if check["status"] in {"checked", "no_qualifying_items"}:
             _require(any(s["status"] == "ok" for s in linked), "Completed coverage needs a successful source read")
         else:
-            blockers.append("required_coverage_incomplete")
+            coverage_gaps.append(name)
+            if allow_partial:
+                warnings.append({"code": "coverage_incomplete", "path": f"checks.{name}"})
+            else:
+                blockers.append("required_coverage_incomplete")
 
     calls = {}
     for index, call in enumerate(metadata["model_calls"]):
@@ -198,6 +209,9 @@ def _validate_audit(directory):
         operation_budget(call, "model", index)
         if call["status"] == "ok":
             _require(not call["error"], "Successful model stage cannot contain an error")
+        elif call["status"] == "partial":
+            _require(allow_partial and coverage_gaps, "Partial research requires an explicit coverage policy and real gaps")
+            warnings.append({"code": "research_partial", "path": f"model_calls[{index}]"})
         else:
             _require(bool(call["error"].strip()), "Failed model stage needs an error")
             blockers.append("model_stage_failed")
@@ -238,6 +252,23 @@ def _validate_audit(directory):
     _require(set(decisions) == set(by_event), "Every candidate needs a selection or exclusion decision")
 
     selected = {key for key, decision in decisions.items() if decision["disposition"] in SELECTED}
+    if allow_partial and coverage_gaps and not selected:
+        blockers.append("partial_report_requires_verified_items")
+    notice = metadata.get("coverage_notice")
+    if allow_partial and coverage_gaps:
+        _require(notice is not None and set(notice["checks"]) == set(coverage_gaps),
+                 "Coverage notice must disclose every incomplete check exactly once")
+        prefix = "部分晨报｜覆盖缺口：" + "、".join(COVERAGE_LABELS[name] for name in COVERAGE_LABELS if name in coverage_gaps) + "。"
+        _require(notice["text"].startswith(prefix) and bool(notice["text"][len(prefix):].strip()),
+                 "Coverage notice needs the explicit partial-report heading and gap details")
+        try:
+            notice_bytes = notice["text"].encode("utf-8")
+        except UnicodeError as exc:
+            raise BriefError("Coverage notice must be valid UTF-8") from exc
+        _require(len(notice_bytes) <= 180 and not any(ord(c) < 32 or ord(c) == 127 or c in "<>" for c in notice["text"]),
+                 "Coverage notice exceeds the public subtitle byte limit or contains forbidden characters")
+    else:
+        _require(notice is None, "Coverage notice is only valid for explicitly permitted incomplete coverage")
     status_entries = {}
     for entry in metadata["status_entries"]:
         key = entry["event_key"]
@@ -258,6 +289,8 @@ def _validate_audit(directory):
                  "Draft must name this date and contain report entries")
         _require(type(draft.get("revision")) is int and draft["revision"] == 1,
                  "Audit supports new daily revision 1 only")
+        if notice is not None:
+            _require(draft.get("subtitle") == notice["text"], "Draft subtitle must preserve the complete coverage notice")
         entries = {}
         for entry in draft["entries"]:
             _require(isinstance(entry, dict) and isinstance(entry.get("event_key"), str), "Invalid draft entry")
@@ -277,10 +310,12 @@ def _validate_audit(directory):
         _require(set(entries) == selected | status_entries.keys(), "Draft must contain every selected event and coverage status exactly once")
 
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
-            "readiness": "blocked" if blockers else ("ready" if selected else "zero_items"),
+            "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected else "zero_items")),
             "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": len(selected),
             "status_entry_count": len(status_entries), "delivery_allowed": False}
-    if metadata["schema_version"] == "1.1":
+    if metadata["schema_version"] != "1.0":
         # 摘要只含固定字段路径，不回显私有解释、来源地址或正文。
-        result.update(warnings=warnings, budget_unknown=bool(warnings))
+        result.update(warnings=warnings, budget_unknown=any(w["code"] == "timing_unavailable" for w in warnings))
+    if metadata["schema_version"] == "1.2":
+        result["coverage_incomplete"] = sorted(coverage_gaps)
     return result

@@ -1,6 +1,7 @@
 """私有审计的离线合同回归；合成样本不是生产研究或送达证据。"""
 
 from contextlib import redirect_stderr, redirect_stdout
+from copy import deepcopy
 import hashlib
 from io import StringIO
 import json
@@ -87,6 +88,146 @@ class ResearchAuditTests(unittest.TestCase):
 
     def missing_timing(self, record):
         record.update(elapsed_seconds=None, timing_unavailable_reason="合成中断：原计时记录丢失，不能恢复真实累计值")
+
+    def partial_coverage(self):
+        self.audit.update(schema_version="1.2", coverage_policy="publish_verified_with_gaps",
+                          coverage_notice={"checks": ["vllm"],
+                                           "text": "部分晨报｜覆盖缺口：vLLM 代码。合成分页读取失败，未核验范围不代表无新进展。"})
+        failed = dict(self.audit["sources"][0], id="blocked", status="failed", content_sha256=None,
+                      error="合成来源拒绝", attempts=2)
+        self.audit["sources"].append(failed)
+        self.audit["checks"]["vllm"].update(status="failed", source_ids=["source", "blocked"],
+                                           reason="合成覆盖缺口，已完成其他候选核验")
+        self.audit["model_calls"][0].update(status="partial", partial_reason="coverage_incomplete",
+                                            error="候选研究与取舍已完成，但来源覆盖不完整")
+        self.draft["subtitle"] = self.audit["coverage_notice"]["text"]
+
+    def test_partial_coverage_retains_failures_and_binds_public_disclosure(self):
+        self.partial_coverage()
+        self.save()
+        before = {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
+        result = validate_audit(self.root)
+        self.assertEqual(result["readiness"], "partial")
+        self.assertEqual(result["coverage_incomplete"], ["vllm"])
+        self.assertEqual(result["blockers"], [])
+        self.assertFalse(result["budget_unknown"])
+        self.assertFalse(result["delivery_allowed"])
+        self.assertEqual(result["warnings"], [
+            {"code": "coverage_incomplete", "path": "checks.vllm"},
+            {"code": "research_partial", "path": "model_calls[0]"},
+        ])
+        self.assertEqual(before, {str(p.relative_to(self.root)): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
+        self.assertNotIn("合成", json.dumps(result, ensure_ascii=False))
+
+    def test_partial_requires_versioned_explicit_policy(self):
+        self.partial_coverage()
+        for version in ("1.0", "1.1"):
+            self.audit["schema_version"] = version
+            self.reject("metadata schema")
+        self.audit["schema_version"] = "1.2"
+        del self.audit["coverage_policy"]
+        self.reject("metadata schema")
+        self.audit["coverage_policy"] = "strict"
+        self.reject("Partial research requires")
+        self.audit["model_calls"][0].update(status="ok", error="")
+        del self.audit["model_calls"][0]["partial_reason"]
+        self.audit["coverage_notice"] = None
+        self.assertIn("required_coverage_incomplete", self.check()["blockers"])
+
+    def test_partial_disclosure_cannot_omit_or_invent_gaps_or_disappear_from_draft(self):
+        self.partial_coverage()
+        notice = deepcopy(self.audit["coverage_notice"])
+        for changed in (None, dict(notice, checks=["sglang"]), dict(notice, checks=["vllm", "sglang"])):
+            self.audit["coverage_notice"] = changed
+            self.reject("disclose every incomplete check")
+        self.audit["coverage_notice"] = notice
+        self.audit["coverage_notice"]["checks"] = ["vllm", "vllm"]
+        self.reject("metadata schema")
+        self.audit["coverage_notice"]["checks"] = ["vllm"]
+        for text in ("完整晨报", "部分晨报｜覆盖缺口：vLLM 代码。", "x" * 181):
+            self.audit["coverage_notice"]["text"] = text
+            self.reject("heading|metadata schema")
+        self.audit["coverage_notice"]["text"] = self.draft["subtitle"]
+        self.draft["subtitle"] = "未标明缺口"
+        self.reject("subtitle must preserve")
+
+    def test_partial_policy_never_turns_incomplete_research_into_zero_item_success(self):
+        self.partial_coverage()
+        self.candidates["items"] = []
+        self.audit["decisions"] = []
+        self.draft["entries"] = []
+        result = self.check()
+        self.assertEqual(result["readiness"], "blocked")
+        self.assertIn("partial_report_requires_verified_items", result["blockers"])
+
+    def test_partial_notice_matches_public_subtitle_utf8_byte_and_character_contract(self):
+        self.partial_coverage()
+        prefix = "部分晨报｜覆盖缺口：vLLM 代码。"
+        text = prefix + "x" * (180 - len(prefix.encode("utf-8")))
+        self.audit["coverage_notice"]["text"] = self.draft["subtitle"] = text
+        self.assertEqual(self.check()["readiness"], "partial")
+        self.audit["coverage_notice"]["text"] = self.draft["subtitle"] = text + "x"
+        self.reject("public subtitle byte limit")
+        self.audit["coverage_notice"]["text"] = self.draft["subtitle"] = prefix + "原始页面读取失败，缺失范围尚未核验。" * 4
+        self.reject("public subtitle byte limit")
+        for character in ("\n", "\r", "\t", "\x00", "\x1f", "\x7f", "<", ">"):
+            self.audit["coverage_notice"]["text"] = self.draft["subtitle"] = prefix + "范围未核验" + character
+            self.reject("forbidden characters")
+
+    def test_partial_only_describes_completed_research_with_coverage_limitations(self):
+        self.partial_coverage()
+        call = self.audit["model_calls"][0]
+        original = deepcopy(call)
+        for changes in ({"partial_reason": "model_crash"}, {"stage": "editor"}, {"error": ""}):
+            call.update(changes)
+            self.reject("metadata schema")
+            call.clear()
+            call.update(original)
+        call.pop("partial_reason")
+        self.reject("metadata schema")
+        call.update(status="failed", error="合成实际模型失败")
+        self.assertIn("model_stage_failed", self.check()["blockers"])
+        call.update(status="timeout")
+        self.assertIn("model_stage_failed", self.check()["blockers"])
+        self.audit["model_calls"].pop(0)
+        self.assertIn("model_stage_missing", self.check()["blockers"])
+
+    def test_partial_policy_preserves_known_budgets_and_selected_evidence_requirements(self):
+        self.partial_coverage()
+        self.missing_timing(self.audit["sources"][-1])
+        self.assertTrue(self.check()["budget_unknown"])
+        original = deepcopy(self.audit)
+        for record, change, blocker in ((self.audit["sources"][-1], {"attempts": 4}, "source_budget_exceeded"),
+                                         (self.audit["model_calls"][0], {"attempts": 3}, "model_budget_exceeded"),
+                                         (self.audit["sources"][0], {"elapsed_seconds": 121}, "source_budget_exceeded"),
+                                         (self.audit["limits"], {"run_seconds": 1}, "run_budget_exceeded")):
+            before = dict(record)
+            record.update(change)
+            self.assertIn(blocker, self.check()["blockers"])
+            record.clear()
+            record.update(before)
+        self.audit = original
+        self.audit["decisions"][0]["source_ids"].append("blocked")
+        self.reject("failed source")
+        self.audit["decisions"][0]["source_ids"].pop()
+        self.candidate["source_type"] = "secondary"
+        self.reject("primary source evidence")
+
+    def test_v12_complete_coverage_remains_ready_and_cannot_claim_partial_research(self):
+        self.audit.update(schema_version="1.2", coverage_policy="publish_verified_with_gaps", coverage_notice=None)
+        self.assertEqual(self.check()["readiness"], "ready")
+        self.audit["model_calls"][0].update(status="partial", partial_reason="coverage_incomplete", error="合成说明")
+        self.reject("Partial research requires")
+
+    def test_partial_cli_is_successful_but_explicitly_incomplete(self):
+        self.partial_coverage()
+        self.save()
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(["audit-research", str(self.root)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["readiness"], "partial")
+        self.assertFalse(result["delivery_allowed"])
 
     def test_v11_retains_successful_evidence_with_honest_timing_warnings(self):
         self.audit["schema_version"] = "1.1"
