@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from ai_brief.cli import main
 from ai_brief.contracts import RESOURCE_ROOT
-from ai_brief.research_audit import validate_audit
+from ai_brief.research_audit import MAX_FILE_BYTES, MAX_PACKAGE_BYTES, validate_audit
 from ai_brief.storage import BriefError
 
 
@@ -343,6 +343,60 @@ class ResearchAuditTests(unittest.TestCase):
                 with self.assertRaisesRegex(BriefError, "fingerprint mismatch"):
                     validate_audit(self.root)
                 path.write_bytes(original)
+
+    def test_large_raw_evidence_retains_full_hash_and_tail_excerpt(self):
+        raw = b" " * 2_800_000 + self.content.encode()
+        path = self.root / "evidence/source.txt"
+        path.write_bytes(raw)
+        self.audit["sources"][0]["content_sha256"] = hashlib.sha256(raw).hexdigest()
+        second = b" " * 3_330_000 + "另一份合成原文".encode()
+        self.root.joinpath("evidence/second.txt").write_bytes(second)
+        self.audit["sources"].append(dict(self.audit["sources"][0], id="second",
+                                         content_sha256=hashlib.sha256(second).hexdigest()))
+        self.assertEqual(self.check()["readiness"], "ready")
+        self.assertEqual(path.read_bytes(), raw)
+        path.write_bytes(raw + b"\n")
+        self.reject("Source content fingerprint mismatch")
+
+    def test_large_evidence_still_requires_actual_utf8_and_excerpt(self):
+        path = self.root / "evidence/source.txt"
+        for ending, error in ((b"\xff", "actual UTF-8"), (b"unrelated", "must occur")):
+            with self.subTest(error=error):
+                raw = b" " * (MAX_FILE_BYTES + 1) + ending
+                path.write_bytes(raw)
+                self.audit["sources"][0]["content_sha256"] = hashlib.sha256(raw).hexdigest()
+                self.reject(error)
+
+    def test_metadata_keeps_original_single_file_limit(self):
+        path = self.root / "history.json"
+        raw = encoded(self.history)
+        raw += b" " * (MAX_FILE_BYTES + 1 - len(raw))
+        path.write_bytes(raw)
+        self.audit["inputs"]["history_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.root.joinpath("audit.json").write_bytes(encoded(self.audit))
+        with self.assertRaisesRegex(BriefError, "Audit file exceeds size limit"):
+            validate_audit(self.root)
+
+    def test_large_evidence_preserves_exact_aggregate_byte_limit(self):
+        self.save()
+        overhead = sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file()
+                       and p.parent.name != "evidence")
+        raw = self.content.encode()
+        raw += b" " * (MAX_PACKAGE_BYTES - overhead - len(raw))
+        path = self.root / "evidence/source.txt"
+        path.write_bytes(raw)
+        self.audit["sources"][0]["content_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(self.check()["readiness"], "ready")
+        raw += b" "
+        path.write_bytes(raw)
+        self.audit["sources"][0]["content_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.reject("Audit package exceeds size limit")
+
+    def test_evidence_larger_than_whole_package_is_rejected(self):
+        path = self.root / "evidence/source.txt"
+        with path.open("wb") as stream:
+            stream.truncate(MAX_PACKAGE_BYTES + 1)
+        self.reject("Audit file exceeds size limit")
 
     def test_missing_source_text_and_fabricated_excerpt_fail(self):
         self.candidate["evidence"] = "不在来源中的内容"
