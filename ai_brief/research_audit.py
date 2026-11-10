@@ -73,16 +73,17 @@ def _validate_audit(directory):
     root = Path(directory).resolve(strict=True)
     total = 0
 
-    def read(relative):
+    def read(relative, max_bytes=MAX_FILE_BYTES):
         nonlocal total
         path = root / relative
         _require(not path.is_symlink() and not path.parent.is_symlink(), "Audit files must not be symlinks")
         _require(path.is_file(), f"Missing audit file: {relative}")
-        _require(path.stat().st_size <= MAX_FILE_BYTES, "Audit file exceeds size limit")
+        _require(path.stat().st_size <= max_bytes, "Audit file exceeds size limit")
+        remaining = min(max_bytes, MAX_PACKAGE_BYTES - total)
         with path.open("rb") as stream:
-            data = stream.read(MAX_FILE_BYTES + 1)
+            data = stream.read(remaining + 1)
         total += len(data)
-        _require(len(data) <= MAX_FILE_BYTES and total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
+        _require(len(data) <= max_bytes and total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
         return data
 
     metadata = _json(read("audit.json"), "audit")
@@ -165,7 +166,8 @@ def _validate_audit(directory):
         operation_budget(source, "source", index)
         if source["status"] == "ok":
             _require(source["content_sha256"] is not None and not source["error"], "Successful source needs content fingerprint and no error")
-            content = read(f"evidence/{identity}.txt")
+            # 原始来源可能超过元数据的单文件上限；总包预算仍约束完整原字节。
+            content = read(f"evidence/{identity}.txt", MAX_PACKAGE_BYTES)
             _require(hashlib.sha256(content).hexdigest() == source["content_sha256"], "Source content fingerprint mismatch")
             try:
                 source_text[identity] = content.decode("utf-8")
