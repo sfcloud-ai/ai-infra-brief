@@ -17,7 +17,7 @@ class VersionedRuntimeTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.driver = DockerDriver.__new__(DockerDriver)
         self.driver.config = {"root": str(self.root), "image": "synthetic-image"}
-        self.driver.live = {"container": "synthetic-managed", "legacy_container": "synthetic-old"}
+        self.driver.live = {"container": "synthetic-managed", "legacy_container": "synthetic-old", "relay_root": str(self.root)}
         self.driver.legacy_path = self.root / "legacy.json"
         self.driver.activation = self.root / "activation"
         self.driver.activation.mkdir()

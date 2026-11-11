@@ -149,6 +149,10 @@ class ScheduledRuntime:
             UNION SELECT request_id FROM parts WHERE status IN ('sending','unknown')
             UNION SELECT request_id FROM image_parts WHERE status IN ('sending','unknown')""").fetchall()
         for (request_id,) in unresolved:
+            mode = store.db.execute("SELECT mode FROM requests WHERE id=?", (request_id,)).fetchone()
+            if mode == ("scheduled_revision",):
+                self.queue.revisions.assert_frozen(request_id)
+                continue
             row = store.db.execute("""SELECT r.mode,r.status,r.intent_hash,q.phase,q.record,q.bundle,q.poster,q.due,q.report_date
                 FROM requests r LEFT JOIN scheduled_notices q ON q.request_id=r.id WHERE r.id=?""", (request_id,)).fetchone()
             try:

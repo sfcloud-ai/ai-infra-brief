@@ -147,6 +147,47 @@ class SchedulerConfigurationTests(unittest.TestCase):
                                  self.script.as_uri()], capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_revision_capability_rejects_old_runtime_without_ledger_mount(self):
+        scheduler = self.load()
+        driver = Mock(config={'uid': 1000, 'gid': 1000, 'image': 'synthetic-image', 'root': '/synthetic-releases'})
+        driver.code.return_value = '/synthetic/code'
+        scheduler.preflight(driver, 'b' * 40, require_revision_notices=True)
+        args = driver.command.call_args_list[0].args[0]
+        check = args[args.index('-c') + 1]
+        self.assertNotIn('dst=/relay', ' '.join(args))
+        runtime = SimpleNamespace(serve=lambda scheduler_config: None, SCHEDULER_DRAIN_VERSION=1)
+        modules = {name: SimpleNamespace() for name in ('scheduled_runtime', 'scheduled_delivery', 'scheduled_socket')}
+        with patch.dict('sys.modules', {'runtime': runtime, **modules}), patch('sys.argv', ['check', '/synthetic/code']):
+            with self.assertRaisesRegex(AssertionError, 'revision_ledger_requires_compatible_release'):
+                exec(check, {})
+
+    def test_revision_ledger_gate_is_read_only_and_precedes_container_changes(self):
+        directory = self.root / 'relay/state'; directory.mkdir(parents=True)
+        path = directory / 'state.sqlite3'
+        with sqlite3.connect(path) as database:
+            database.execute('PRAGMA journal_mode=WAL')
+            database.execute('CREATE TABLE requests(mode TEXT)')
+            database.execute('CREATE TABLE scheduled_revision_notices(request_id TEXT)')
+        database.close()
+        driver = DockerDriver.__new__(DockerDriver)
+        driver.config = {'uid': os.getuid(), 'gid': os.getgid()}
+        driver.live = {'relay_root': str(directory.parent), 'container': 'managed', 'legacy_container': 'legacy'}
+        self.assertFalse(driver.revision_records_present())
+        with sqlite3.connect(path) as database:
+            database.execute("INSERT INTO scheduled_revision_notices VALUES ('morning-20261101-r2')")
+        database.close()
+        self.assertFalse(path.with_name(path.name + "-wal").exists())
+        before = path.read_bytes()
+        self.assertTrue(driver.revision_records_present())
+        driver.scheduler = Mock(); driver.scheduler.preflight.side_effect = ServiceError('incompatible_revision_runtime')
+        driver.running_release = Mock(return_value=None); driver.inspect = Mock(return_value=None); driver.command = Mock()
+        with self.assertRaisesRegex(ServiceError, 'incompatible_revision_runtime'):
+            driver.start_paused('b' * 40)
+        driver.command.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+        for item in directory.iterdir():
+            self.assertEqual(item.stat().st_uid, os.getuid())
+
     def container(self, scheduler):
         mounts = [{'Destination': str(p), 'Source': str(p), 'RW': p == self.ipc}
                   for p in [self.config, self.node, self.tree, self.ipc]]
@@ -201,7 +242,7 @@ class SchedulerCutoverTests(unittest.TestCase):
                     result = self.request(controller, operation)
                     # 模拟旧确认返回后重启并准入新任务；不能用旧确认直接停止。
                     controller.phase = 'active'
-                    db.execute("INSERT INTO scheduled_notices VALUES ('pending')")
+                    db.execute("INSERT INTO scheduled_notices(phase) VALUES ('pending')")
                     return result
                 self.assertEqual(json.loads(active.read_text()), {'release': None})
                 return self.request(controller, operation)
@@ -216,7 +257,7 @@ class SchedulerCutoverTests(unittest.TestCase):
         self.addCleanup(db.close)
         for table in ('requests', 'parts', 'image_parts'):
             db.execute('CREATE TABLE ' + table + ' (status TEXT)')
-        db.execute('CREATE TABLE scheduled_notices (phase TEXT)')
+        db.execute('CREATE TABLE scheduled_notices (phase TEXT, request_id TEXT)')
         receiver = SimpleNamespace(store=SimpleNamespace(db=db))
         scheduler = SimpleNamespace(assert_reconciled=Mock(), queue=Mock())
         controller = ControlledRelay(relay, receiver, 'a' * 40, scheduled=scheduler)
@@ -244,7 +285,7 @@ class SchedulerCutoverTests(unittest.TestCase):
             active.write_text(json.dumps({'release': controller.release}))
             for phase in ('pending', 'verifying', 'unknown'):
                 db.execute('DELETE FROM scheduled_notices')
-                db.execute('INSERT INTO scheduled_notices VALUES (?)', (phase,))
+                db.execute('INSERT INTO scheduled_notices(phase) VALUES (?)', (phase,))
                 with self.subTest(phase=phase), \
                         patch.object(driver, 'preflight'), patch.object(driver, 'preflight_rollback'), \
                         patch.object(driver, 'scheduler_binding', return_value='c' * 64), \
@@ -261,7 +302,7 @@ class SchedulerCutoverTests(unittest.TestCase):
 
     def test_atomic_drain_closes_admission_only_when_no_jobs_remain(self):
         controller, db = self.controller()
-        db.execute("INSERT INTO scheduled_notices VALUES ('pending')")
+        db.execute("INSERT INTO scheduled_notices(phase) VALUES ('pending')")
         self.assertFalse(self.request(controller, 'drain')['reconciled'])
         self.assertEqual(controller.phase, 'active')
         db.execute("UPDATE scheduled_notices SET phase='complete'")
@@ -291,7 +332,7 @@ class SchedulerCutoverTests(unittest.TestCase):
 
     def test_active_health_accepts_runnable_queue_but_not_invalid_state(self):
         controller, db = self.controller()
-        db.execute("INSERT INTO scheduled_notices VALUES ('pending')")
+        db.execute("INSERT INTO scheduled_notices(phase) VALUES ('pending')")
         result = self.request(controller, 'status')
         self.assertFalse(result['reconciled'])
         self.assertTrue(result['delivery_ready'])
@@ -343,7 +384,7 @@ class SchedulerCutoverTests(unittest.TestCase):
     def test_start_and_rollback_use_same_mounts_config_and_paused_protocol(self):
         with tempfile.TemporaryDirectory() as directory:
             driver = DockerDriver.__new__(DockerDriver)
-            driver.live = {'container': 'synthetic-managed', 'legacy_container': 'synthetic-old'}
+            driver.live = {'container': 'synthetic-managed', 'legacy_container': 'synthetic-old', 'relay_root': directory}
             driver.config = {'image': 'synthetic-image'}
             driver.activation = Path(directory)
             driver.scheduler = Mock(binding='c' * 64)

@@ -192,8 +192,17 @@ def bundle_poster(data, manifest, base):
     require(metadata is not None and len(metadata) < 128 * 1024
             and hashlib.sha256(metadata).hexdigest() == manifest["report_sha256"])
     report = json.loads(metadata.decode("utf-8"), object_pairs_hook=_unique_object)
-    exact(report, ["schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"])
-    require(report["schema_version"] == "1.0" and report["date"] == manifest["date"]
+    revised = report.get("schema_version") == "1.1"
+    exact(report, ["schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"] + (["revision_notice"] if revised else []))
+    if revised:
+        if __package__:
+            from .revision_notice import validate_notice
+        else:
+            from revision_notice import validate_notice
+        exact(report["revision_notice"], ["kind", "summary"])
+        require(type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"])
+        validate_notice({"revision": manifest["revision"], **report["revision_notice"]})
+    require(report["schema_version"] in {"1.0", "1.1"} and report["date"] == manifest["date"]
             and type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"]
             and isinstance(report["images"], list) and len(report["images"]) <= 20
             and build_manifest({**report, "revision": manifest["revision"]}, base,
