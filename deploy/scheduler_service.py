@@ -110,7 +110,7 @@ class SchedulerDeployment:
     def serve_args(self):
         return ['--scheduler-config', str(CONFIG)]
 
-    def preflight(self, driver, release, require_scheduled_only=False):
+    def preflight(self, driver, release, require_scheduled_only=False, require_revision_notices=False):
         """无网络、无账本和凭据挂载，先验证候选及回滚版本能加载固定依赖。"""
         code = driver.code(release)
         if code == '/legacy':
@@ -123,6 +123,7 @@ class SchedulerDeployment:
             'assert "scheduler_config" in inspect.signature(runtime.serve).parameters; '
             'assert runtime.SCHEDULER_DRAIN_VERSION==1; '
             + ('assert getattr(runtime,"SCHEDULED_ONLY_VERSION",0)==1; ' if require_scheduled_only else '')
+            + ('assert getattr(runtime,"REVISION_NOTICES_VERSION",0)==1, "revision_ledger_requires_compatible_release"; ' if require_revision_notices else '')
             +
             'assert "can_admit" in inspect.signature(scheduled_runtime.ScheduledRuntime.open).parameters; '
             'c=scheduled_runtime.load_config(Path(sys.argv[2])); '

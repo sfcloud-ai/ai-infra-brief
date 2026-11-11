@@ -713,7 +713,7 @@ class Store:
         self.db.execute("UPDATE image_parts SET status='unknown' WHERE status='sending'")
         self.db.execute("""UPDATE image_parts SET status='not_attempted'
             WHERE status IN ('pending','downloading') AND request_id NOT IN
-            (SELECT id FROM requests WHERE mode='scheduled')""")
+            (SELECT id FROM requests WHERE mode IN ('scheduled','scheduled_revision'))""")
         self.db.commit()
 
     def get(self, key, default=None):
@@ -902,9 +902,22 @@ class Relay:
                     raise RelayError("request_id_conflict", 409)
                 return self.store.status(request_id)
             edition_request = (self.store.get(day_key) if day_key else None) or (self.store.get(edition) if edition else None)
-            if repeat and edition and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_notices'").fetchone():
-                if db.execute("SELECT 1 FROM scheduled_notices WHERE report_date=? AND phase!='complete' LIMIT 1", (report_date,)).fetchone():
-                    raise RelayError("scheduled_reconciliation_required", 409)
+            if repeat and edition:
+                for table in ('scheduled_notices', 'scheduled_revision_notices'):
+                    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                        continue
+                    for rid, phase in db.execute('SELECT request_id,phase FROM '+table+' WHERE report_date=?', (report_date,)).fetchall():
+                        if phase == 'superseded':
+                            if __package__:
+                                from .revision_drain import validate_superseded
+                            else:
+                                from revision_drain import validate_superseded
+                            try:
+                                validate_superseded(db, rid)
+                            except ValueError:
+                                raise RelayError('scheduled_reconciliation_required', 409) from None
+                        elif phase not in {'complete', 'skipped'}:
+                            raise RelayError('scheduled_reconciliation_required', 409)
             prior = db.execute("SELECT status FROM requests WHERE source_key=? OR message_ts=? OR id=? ORDER BY created DESC LIMIT 1",
                                (source, timestamp, edition_request)).fetchone() if source else None
             status, preflight_error = "sending", None

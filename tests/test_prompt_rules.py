@@ -71,7 +71,7 @@ class PromptRuleTests(unittest.TestCase):
             text = (PROMPTS / name).read_text(encoding="utf-8")
             for term in ("每天只有一份当前网页", "/YYYY-MM-DD/", "/YYYY-MM-DD/<article-id>/",
                          "不含 `/rN/`", "兼容跳转", "revision", "request_id", "发送账本",
-                         "不授予再次"):
+                         "revision_notice", "correction", "material_update", "maintenance", "简短", "未知"):
                 self.assertIn(term, text, f"{name}: {term}")
         delivery = (PROMPTS / "delivery.md").read_text(encoding="utf-8")
         notice = re.search(r"```text\n(.*?)\n```", delivery, re.DOTALL).group(1)

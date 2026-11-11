@@ -24,7 +24,7 @@ https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/second-article/
 
 旧 `/YYYY-MM-DD/rN/` 及其文章 URL 只保留兼容跳转，不保留旧正文；仍存在的文章跳到相同 article-id 的稳定 URL，已移除文章跳到该日期总页。跳转壳使用 noindex 和稳定 canonical，不进入导航或搜索。未知日期、非法路径不得被通配跳转伪装成有效页面。Git 历史和原发布证据继续保存；公开网页合一不表示删除发送记录或覆盖已绑定原包。
 
-`revision`、`request_id`、原文件哈希、提交和发送账本仍是内部发布与去重身份，不能从无版本的公开 URL 推导或重置它们。报告、子文章、图片与去重索引必须对应同一获准内容；网页修正、内部 revision 增加或 URL 迁移都不授予再次正式投递权限。
+`revision`、`request_id`、原文件哈希、提交和发送账本仍是内部发布与去重身份，不能从无版本的公开 URL 推导或重置它们。报告、子文章、图片与去重索引必须对应同一获准内容；网页哈希、内部 revision 增加或 URL 迁移本身不决定重发；经内容审查的 `schema_version: "1.1"` 与 `revision_notice` 按下述修订策略产生独立通知。
 
 ## 发布先于通知
 
@@ -49,7 +49,7 @@ https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/second-article/
 - 新报告的当前源使用 `reports/YYYY-MM-DD/` 下的 report.json、articles 和 assets；从相同源生成稳定 `/reports/YYYY-MM-DD/notice.json` 与发布证明。内部 `/reports/YYYY-MM-DD/rN/notice.json`、publication-proof.json 可按已部署协议保留为当前证据的技术别名，不能因此生成第二套网页或版本化公开文章链接。绑定正文、文章清单、原报告和海报 SHA256、构建 commit；历史原包及旧回执不改写。转发器只读配置中固定的报告站，证据读取禁止重定向且不携带 Slack 凭据，前后读取 publication.json 核对 commit；访问失败保留消息和游标，不能当成非法消息跳过。网页兼容跳转不放宽机器证据读取规则。清单读取设总期限，未知写入仍禁止自动重发。
 - 校验返回真实 Slack ts 与 `auto:<ts>`，始终保留 `wecom_status=not_checked`、`publication_status=not_checked`。标题匹配、附件元数据通过、离线假传输成功均不代表企微送达或网页可访问。
 - 企微：已有权限的执行者核对对应 relay 请求的文字和图片状态，文字 `parts_sent == parts_total`、海报为 `sent`；再在获准目的地检查可见内容、顺序和图中文字。缺回执、`partial`、`failed`、`unknown` 均不算完整成功。
-- 通知账本继续关联内部报告版本、原 request_id、发布 commit、海报摘要、目的地与真实 Slack ts，保留原日期和版次去重关系；历史连接器的原版次 URL 映射与原机器人源消息去重记录不重置。同一期换 ts、附件 ID、网页路径或内部版本都不会自动取得重发权限，已发送的日期不因修稿再发。未知结果先核对已有回执，不自动重发、补发历史，不靠编辑旧消息期待补转发。
+- 通知账本继续关联内部报告版本、原 request_id、发布 commit、海报摘要、目的地与真实 Slack ts，保留原日期和版次去重关系；历史连接器的原版次 URL 映射与原机器人源消息去重记录不重置。同一期换 ts、附件 ID、网页路径或内部版本都不重置原发送意图。同日重要修订使用新 rN 请求，按经过审查的 `revision_notice` 发送短文，普通维护以网页更新结束。未知结果先核对已有回执，不自动重发、补发历史，不靠编辑旧消息期待补转发。
 
 ## 责任边界
 
@@ -58,3 +58,7 @@ https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/second-article/
 回归采用合成消息、合成图片和假传输，验证标题、blocks、URL、精确身份、图片计划、版次与源消息去重。报告站和机器人在独立报告仓库接入。relay 继续使用原 SQLite 账本并保存独立连接器身份摘要与版次映射；原时间戳来源键兼容旧版。启用时保留游标与历史，不重置投递状态。
 
 分项通知海报采用原字节契约：上传前核对本地实际字节的 SHA256 与已发布 manifest 一致，并使用已验证不会改写字节的原生上传路径。正式生产路径未经实测不能宣称支持；不得以像素相同替代字节摘要。历史原生连接器读回后必须下载该实际 file ID 的原图字节并传给 `check_received_notice`，不符则停止并核对，不能换 file ID 重发。企微转发器必须在任何文字发送前先验证海报，复用同一份已验字节；partial/unknown 不得报成功。
+
+## 同日修订通知
+
+首次发布继续使用完整标题列表和原海报。首次通知后，事实纠错 `correction` 或重要新增 `material_update` 发送一条日期、简短说明与稳定日期页链接；排版、链接维护与措辞调整 `maintenance` 更新网页，记录 `web_only / skipped` 零发送。说明非空单行，最多 600 UTF-8 字节，概括首次发布以来仍有效的重要变化。完整修订包使用 `schema_version: "1.1"`、递增 revision 和新 `morning-YYYYMMDD-rN`，由原 Publisher→scheduler→relay 执行；首次尚未发送时最新版本仍承担完整首发。已进入发送边界的原请求与未知回执保留，后续请求不重复尝试未知的同一文字。编辑与接入细节见同 commit 的 [editor.md](editor.md#同日修订与通知)。

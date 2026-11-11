@@ -29,7 +29,7 @@ def read_result(data, request):
     sent = json.loads(request.decode("utf-8"), object_pairs_hook=unique)
     require(isinstance(result, dict) and isinstance(sent, dict))
     if sent.get("action") != "inspect":
-        require(result.get("status") in {"not_found", "not_verified", "queued", "sending", "sent", "failed", "unknown", "partial"})
+        require(result.get("status") in {"not_found", "not_verified", "queued", "sending", "sent", "failed", "unknown", "partial", "skipped"})
         return result
     if result.get("status") == "not_verified":
         require(result == {"status": "not_verified", "error": "scheduled_request_rejected"})
@@ -45,15 +45,19 @@ def read_result(data, request):
     if claim is None or scheduler is None:
         require(claim is None and scheduler is None)
         return result
+    day = sent.get("report_date", "")
+    canonical_day = day.replace("-", "") if isinstance(day, str) else ""
+    successor = (sent.get("request_id") == f"morning-{canonical_day}-r1" and isinstance(claim, dict)
+                 and re.fullmatch(f"morning-{canonical_day}-r[1-9][0-9]*", claim.get("request_id", "")))
     require(isinstance(claim, dict) and set(claim) == {"request_id", "report_date", "bundle_sha256", "report_commit"}
-            and claim["request_id"] == sent.get("request_id") and claim["report_date"] == sent.get("report_date")
+            and (claim["request_id"] == sent.get("request_id") or successor) and claim["report_date"] == sent.get("report_date")
             and isinstance(claim["bundle_sha256"], str) and re.fullmatch(r"[a-f0-9]{64}", claim["bundle_sha256"]) is not None
             and isinstance(claim["report_commit"], str) and re.fullmatch(r"[a-f0-9]{40}", claim["report_commit"]) is not None)
     fields = {"status", "parts_total", "parts_sent", "phase", "next_attempt_at", "attempts", "last_error", "images"}
     require(isinstance(scheduler, dict) and set(scheduler) == set(claim) | fields
             and all(scheduler[k] == v for k, v in claim.items())
             and scheduler["status"] in {"queued", "sending", "sent", "failed", "unknown"}
-            and scheduler["phase"] in {"pending", "verifying", "sending", "unknown", "complete"}
+            and scheduler["phase"] in {"pending", "verifying", "sending", "unknown", "complete", "superseded"}
             and type(scheduler["parts_total"]) is int and 2 <= scheduler["parts_total"] <= 41
             and type(scheduler["parts_sent"]) is int and 0 <= scheduler["parts_sent"] <= scheduler["parts_total"]
             and type(scheduler["attempts"]) is int and 0 <= scheduler["attempts"] <= 9007199254740991

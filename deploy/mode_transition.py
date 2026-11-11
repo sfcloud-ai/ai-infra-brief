@@ -16,6 +16,56 @@ else:
     from supervisor import ServiceError
 
 RECORD = 'mode-transition.json'
+VERIFIER_MAINTENANCE = Path('/opt/ai-brief-scheduler/verifier-maintenance')
+
+
+def maintained_verifier(value, expected, expected_binding):
+    """只接受已完成且原账本保留的管理员 verifier 维护链，不改迁移历史。"""
+    def read(path):
+        scheduler_service.admin_path(path)
+        raw = path.read_bytes()
+        if len(raw) > 65536:
+            raise ValueError('maintenance_record_too_large')
+        return raw, json.loads(raw, object_pairs_hook=scheduler_service.unique)
+
+    seen, next_binding = set(), None
+    try:
+        while value != expected:
+            if ({k: v for k, v in value.items() if k != 'verifier_path'}
+                    != {k: v for k, v in expected.items() if k != 'verifier_path'}):
+                return False
+            script = Path(value['verifier_path'])
+            sha = script.parent.parent.name
+            if (script != scheduler_service.VERIFIERS / sha / 'scripts/verify-scheduled-delivery.mjs'
+                    or not re.fullmatch('[a-f0-9]{40}', sha) or sha in seen or len(seen) >= 64):
+                return False
+            seen.add(sha)
+            root = VERIFIER_MAINTENANCE / sha
+            original_raw, original = read(root / 'original.json')
+            candidate_raw, candidate = read(root / 'candidate.json')
+            _, prepared = read(root / 'prepared.json')
+            _, activation = read(root / 'activation.json')
+            old_binding, new_binding = prepared.get('old_binding'), activation.get('new_binding')
+            if (candidate != value or prepared.get('reports') != sha
+                    or activation.get('reports') != sha
+                    or not re.fullmatch('[a-f0-9]{40}', prepared.get('application', ''))
+                    or activation.get('application') != prepared['application']
+                    or prepared.get('original_config_sha256') != hashlib.sha256(original_raw).hexdigest()
+                    or prepared.get('candidate_config_sha256') != hashlib.sha256(candidate_raw).hexdigest()
+                    or not isinstance(old_binding, str) or not re.fullmatch('[a-f0-9]{64}', old_binding)
+                    or not isinstance(new_binding, str) or not re.fullmatch('[a-f0-9]{64}', new_binding)
+                    or activation.get('old_binding') != old_binding
+                    or next_binding is not None and next_binding != new_binding
+                    or activation.get('phase') != 'complete'
+                    or activation.get('original_records_preserved') is not True
+                    or activation.get('application_policy_unchanged') is not True):
+                return False
+            value, next_binding = original, old_binding
+        # Runtime binding includes the fixed verifier files, Node and UID/GID.
+        # Preserve those audited opaque identities; never substitute a config hash.
+        return next_binding == expected_binding
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
 
 
 def guard(root):
@@ -26,7 +76,8 @@ def guard(root):
             raise ServiceError('mode_transition_requires_forward_recovery')
         value = json.loads(scheduler_service.CONFIG.read_text(),
                            object_pairs_hook=scheduler_service.unique)
-        if value != {**record['old_config'], 'automatic_delivery': 'scheduled_only'}:
+        expected = {**record['old_config'], 'automatic_delivery': 'scheduled_only'}
+        if value != expected and not maintained_verifier(value, expected, record.get('new_binding')):
             raise ServiceError('migration_mode_regression')
 
 

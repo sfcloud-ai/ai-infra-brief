@@ -364,3 +364,42 @@ class TransitionTests(unittest.TestCase):
         for name in ('legacy', 'scheduled-only /tmp/config', 'scheduled-only 10 ' + SHA + ' legacy'):
             with self.assertRaises(ValueError):
                 parse_command(name)
+
+    def test_guard_accepts_only_complete_bound_verifier_maintenance_chain(self):
+        base = {**self.original, 'automatic_delivery':'scheduled_only',
+                'verifier_path':str(mode.scheduler_service.VERIFIERS / ('c'*40) / 'scripts/verify-scheduled-delivery.mjs')}
+        runtime_binding = lambda config: hashlib.sha256(('runtime-files-and-node:'+json.dumps(config,sort_keys=True)).encode()).hexdigest()
+        write_json(self.root / mode.RECORD, {'phase':'complete', 'old_config':base, 'new_binding':runtime_binding(base)})
+        maintenance = self.root / 'maintenance'
+
+        def proof(original, sha):
+            candidate = {**original, 'verifier_path':str(mode.scheduler_service.VERIFIERS / sha / 'scripts/verify-scheduled-delivery.mjs')}
+            folder = maintenance / sha; folder.mkdir(parents=True)
+            write_json(folder / 'original.json', original); write_json(folder / 'candidate.json', candidate)
+            prepared = {'reports':sha, 'application':SHA, 'old_binding':runtime_binding(original),
+                        'original_config_sha256':hashlib.sha256((folder/'original.json').read_bytes()).hexdigest(),
+                        'candidate_config_sha256':hashlib.sha256((folder/'candidate.json').read_bytes()).hexdigest()}
+            write_json(folder/'prepared.json', prepared)
+            activation = {'reports':sha, 'application':SHA, 'old_binding':runtime_binding(original),
+                          'new_binding':runtime_binding(candidate), 'phase':'complete',
+                          'original_records_preserved':True, 'application_policy_unchanged':True}
+            write_json(folder/'activation.json', activation)
+            return candidate, folder, activation
+
+        first, _, _ = proof(base, 'd'*40)
+        current, folder, activation = proof(first, 'e'*40)
+        write_json(self.config_path, current)
+        before = (self.root/mode.RECORD).read_bytes()
+        with patch.object(mode, 'VERIFIER_MAINTENANCE', maintenance):
+            mode.guard(self.root)
+            for change in ({'phase':'activation_started'}, {'original_records_preserved':False},
+                           {'new_binding':'bad'}, {'old_binding':'0'*64}, {'application':'f'*40}):
+                write_json(folder/'activation.json', {**activation, **change})
+                with self.assertRaisesRegex(ServiceError, 'migration_mode_regression'): mode.guard(self.root)
+            write_json(folder/'activation.json', activation)
+            write_json(self.config_path, {**current, 'publisher_uid':123})
+            with self.assertRaisesRegex(ServiceError, 'migration_mode_regression'): mode.guard(self.root)
+            write_json(self.config_path, current)
+            (folder/'original.json').write_text('{}')
+            with self.assertRaisesRegex(ServiceError, 'migration_mode_regression'): mode.guard(self.root)
+        self.assertEqual((self.root/mode.RECORD).read_bytes(), before)

@@ -16,8 +16,12 @@ import uuid
 
 if __package__:
     from . import relay
+    from .revision_notice import validate_notice
+    from .revision_delivery import RevisionDelivery
 else:
     import relay
+    from revision_notice import validate_notice
+    from revision_delivery import RevisionDelivery
 
 
 class ScheduledDeliveryError(ValueError):
@@ -51,8 +55,10 @@ def scheduled_notice_day(url, profile):
 
 def validate_plan(plan, bundle, commit):
     fields = {"report_request_id", "report_date", "report_commit", "bundle_sha256", "notice_key", "text", "poster", "poster_sha256", "mime"}
-    if not isinstance(plan, dict) or set(plan) != fields:
+    if not isinstance(plan, dict) or set(plan) not in (fields, fields | {"revision_notice"}):
         raise ScheduledDeliveryError("Exact verified plan required")
+    if "revision_notice" in plan:
+        validate_notice(plan["revision_notice"])
     if (not isinstance(bundle, bytes) or not 0 < len(bundle) <= 8*1024*1024
             or not isinstance(commit, str) or not re.fullmatch(r"[a-f0-9]{40}", commit)
             or plan["report_commit"] != commit
@@ -143,14 +149,19 @@ class ScheduledDelivery:
                 raise ScheduledDeliveryError("Scheduled scope differs; reconcile before changing")
             if saved is None:
                 self.db.execute("INSERT INTO meta VALUES (?,?)", ("scheduled_delivery_scope_v1",scope))
+        self.revisions = RevisionDelivery(self, validate_plan)
 
     def status(self, request_id):
         # 纯读取业务状态，包括未知结果，不触发预约或发送。
         row = self.db.execute("SELECT phase,next_at,attempts,last_error,record FROM scheduled_notices WHERE request_id=?", (request_id,)).fetchone()
         if row is None:
-            return {"status": "not_found"}
+            return self.revisions.status(request_id) or {"status": "not_found"}
         record=json.loads(row[4])
-        return {**self.store.status(request_id), "phase": row[0], "next_attempt_at": row[1], "attempts": row[2], "last_error": row[3], **{k:record[k] for k in ("report_date","report_commit","bundle_sha256")}}
+        result = {**self.store.status(request_id), "phase": row[0], "next_attempt_at": row[1], "attempts": row[2], "last_error": row[3], **{k:record[k] for k in ("report_date","report_commit","bundle_sha256")}}
+        if row[0] == "superseded":
+            self.revisions.check_supersession(request_id, row[4])
+            result["superseded_by"] = self.db.execute("SELECT successor FROM scheduled_supersessions WHERE predecessor=?", (request_id,)).fetchone()[0]
+        return result
 
     def inspect(self, request_id, report_date):
         """返回原账本的点时快照；不准入、联网核验、投递或修复历史记录。"""
@@ -171,7 +182,13 @@ class ScheduledDelivery:
                 scheduler = self._inspect_bound(request_id, report_date, meta)
                 claim = {k: scheduler[k] for k in ("request_id", "report_date", "bundle_sha256", "report_commit")}
             else:
-                self._inspect_absence(request_id, report_date, meta)
+                day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], report_date])
+                owner = meta.get(day_key)
+                if owner and self.revisions.row(owner):
+                    scheduler = self.revisions.inspect(owner, report_date)
+                    claim = {k: scheduler[k] for k in ("request_id", "report_date", "bundle_sha256", "report_commit")}
+                else:
+                    self._inspect_absence(request_id, report_date, meta)
             return {"read_context": {"scheduler_scope_sha256": scope}, "observed_at": int(observed_at),
                     "complete": True, "scheduler_day_claim": claim, "scheduler": scheduler}
         finally:
@@ -225,7 +242,9 @@ class ScheduledDelivery:
         actual_sent = sum(p[2] == "sent" for p in parts) + int(image[2] == "sent")
         inspect_require(type(total) is int and total == len(parts) + 1 and type(sent) is int and sent == actual_sent
                         and status in {"queued", "sending", "sent", "failed", "unknown"}
-                        and phase in {"pending", "verifying", "sending", "unknown", "complete"})
+                        and phase in {"pending", "verifying", "sending", "unknown", "complete", "superseded"})
+        if phase == "superseded":
+            self.revisions.check_supersession(request_id, encoded)
         inspect_require((status == "sent") == (phase == "complete") == (sent == total))
         actual_states = [p[2] for p in parts] + [image[2]]
         inspect_require((phase not in {"pending", "verifying"} or status in {"queued", "failed"})
@@ -255,9 +274,19 @@ class ScheduledDelivery:
     def _inspect_completed_handoff(self, request_id, report_date, owner, meta):
         """已完成定时记录可由显式手动重发接替；旧记录和接替回执必须均完整。"""
         original = self._inspect_bound(request_id, report_date, meta, check_current_claim=False)
-        inspect_require(original["status"] == "sent" and original["phase"] == "complete")
+        if original['phase'] == 'superseded':
+            if __package__:
+                from .revision_drain import validate_superseded
+            else:
+                from revision_drain import validate_superseded
+            validate_superseded(self.db, request_id)
+        else:
+            inspect_require(original["status"] == "sent" and original["phase"] == "complete")
         record = json.loads(self.db.execute("SELECT record FROM scheduled_notices WHERE request_id=?", (request_id,)).fetchone()[0])
-        suffix = relay.digest([self.config["team_id"], self.config["channel_id"], record["notice_key"]])
+        self._inspect_completed_owner_claims(request_id, report_date, record['notice_key'], owner, meta)
+
+    def _inspect_completed_owner_claims(self, request_id, report_date, notice_key, owner, meta):
+        suffix = relay.digest([self.config["team_id"], self.config["channel_id"], notice_key])
         day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], report_date])
         inspect_require(meta.get(day_key) == owner and meta.get("notice_edition_date:" + suffix) == report_date
                         and "notice_edition:" + suffix in meta)
@@ -266,6 +295,16 @@ class ScheduledDelivery:
         inspect_require(owner in owners)
         # 换版手动重发只接管新版本；旧版本可继续指向已完成的原始或手动回执。
         for edition_owner in owners - {request_id}:
+            retained = False
+            for table in ('scheduled_notices', 'scheduled_revision_notices'):
+                if edition_owner != owner and self.db.execute('SELECT 1 FROM '+table+" WHERE request_id=? AND report_date=? AND phase='superseded'", (edition_owner, report_date)).fetchone():
+                    if __package__:
+                        from .revision_drain import validate_superseded
+                    else:
+                        from revision_drain import validate_superseded
+                    validate_superseded(self.db, edition_owner); retained = True
+            if retained:
+                continue
             self._inspect_completed_manual_owner(request_id, edition_owner)
 
     def _inspect_completed_manual_owner(self, request_id, owner):
@@ -312,7 +351,13 @@ class ScheduledDelivery:
                         and report_date not in owners)
         for table in ("parts", "image_parts"):
             inspect_require(self.db.execute("SELECT 1 FROM " + table + " p LEFT JOIN requests r ON r.id=p.request_id WHERE r.id IS NULL LIMIT 1").fetchone() is None)
-        inspect_require(self.db.execute("SELECT 1 FROM requests r WHERE r.mode!='scheduled' AND (r.status IN ('sending','unknown') OR EXISTS(SELECT 1 FROM parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown')) OR EXISTS(SELECT 1 FROM image_parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown'))) LIMIT 1").fetchone() is None)
+        unresolved = self.db.execute("SELECT id FROM requests r WHERE r.mode!='scheduled' AND (r.status IN ('sending','unknown') OR EXISTS(SELECT 1 FROM parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown')) OR EXISTS(SELECT 1 FROM image_parts p WHERE p.request_id=r.id AND p.status IN ('sending','unknown')))").fetchall()
+        for (rid,) in unresolved:
+            self.revisions.assert_frozen(rid)
+        inspect_require(self.db.execute("SELECT 1 FROM requests r LEFT JOIN scheduled_revision_notices q ON q.request_id=r.id WHERE r.mode='scheduled_revision' AND q.request_id IS NULL LIMIT 1").fetchone() is None)
+        for (rid, day) in self._inspection_rows("SELECT request_id,report_date FROM scheduled_revision_notices"):
+            inspect_require(day != report_date)
+            self.revisions.check_record(rid)
         inspect_require(self.db.execute("SELECT 1 FROM requests r LEFT JOIN scheduled_notices q ON q.request_id=r.id WHERE r.mode='scheduled' AND q.request_id IS NULL LIMIT 1").fetchone() is None)
         for rid, day, encoded in self._inspection_rows("SELECT request_id,report_date,record FROM scheduled_notices"):
             record = json.loads(encoded, object_pairs_hook=relay.notice_format._unique_object)
@@ -342,6 +387,8 @@ class ScheduledDelivery:
         day = scheduled_notice_day(record["notice_key"], relay.validate_notice_connector(self.config["notice_connector"]))
         if day != record["report_date"]:
             raise ScheduledDeliveryError("Notice date differs")
+        if "revision_notice" in record:
+            return self.revisions.admit(request_id, record, poster, bundle, due)
         pieces = relay.chunks(record["text"])
         edition = "notice_edition:" + relay.digest([self.config["team_id"], self.config["channel_id"], record["notice_key"]])
         day_key = "notice_day:" + relay.digest([self.config["team_id"], self.config["channel_id"], record["report_date"]])
@@ -376,7 +423,8 @@ class ScheduledDelivery:
                 WHERE next_at<=? AND due<=? AND (phase='pending' OR (phase='verifying' AND lease_until<=?))
                 ORDER BY due LIMIT 1""", (now,now,now)).fetchone()
             if row is None:
-                return None
+                self.db.commit()
+                return self.revisions.tick()
             request_id, encoded, bundle, poster = row
             self.db.execute("UPDATE scheduled_notices SET phase='verifying',owner=?,lease_until=? WHERE request_id=?", (self.owner,now+180,request_id))
         started = self.clock()

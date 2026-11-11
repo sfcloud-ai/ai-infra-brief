@@ -84,5 +84,22 @@ def assert_reconciled(store):
     # 旧版运行时无法保留未完成的定时图片分片，因此不得带着排队任务切换版本。
     # 重启时关闭调度配置也必须遵守这条排空约束。
     if store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_notices'").fetchone():
-        if store.db.execute("SELECT 1 FROM scheduled_notices WHERE phase!='complete' LIMIT 1").fetchone():
+        if store.db.execute("SELECT 1 FROM scheduled_notices WHERE phase NOT IN ('complete','superseded') LIMIT 1").fetchone():
             raise ValueError("unfinished_scheduled_delivery_blocks_cutover")
+        superseded = store.db.execute("SELECT request_id FROM scheduled_notices WHERE phase='superseded'").fetchall()
+        if superseded:
+            if __package__:
+                from .revision_drain import validate_superseded
+            else:
+                from revision_drain import validate_superseded
+            for (request_id,) in superseded:
+                validate_superseded(store.db, request_id)
+    if store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='scheduled_revision_notices'").fetchone():
+        if store.db.execute("SELECT 1 FROM scheduled_revision_notices WHERE phase NOT IN ('complete','skipped','superseded') LIMIT 1").fetchone():
+            raise ValueError("unfinished_revision_delivery_blocks_cutover")
+        if __package__:
+            from .revision_drain import validate_superseded
+        else:
+            from revision_drain import validate_superseded
+        for (request_id,) in store.db.execute("SELECT request_id FROM scheduled_revision_notices WHERE phase='superseded'").fetchall():
+            validate_superseded(store.db, request_id)
