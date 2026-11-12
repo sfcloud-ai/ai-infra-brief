@@ -56,11 +56,12 @@ class PromptRuleTests(unittest.TestCase):
             text = (PROMPTS / name).read_text(encoding="utf-8")
             self.assertIn("[私有审计合同 audit.md](audit.md)", text)
             self.assertIn("audit-research", text)
-            self.assertIn("只有任务明确启用", text)
-            self.assertIn("不自动改变现行晨报发布门禁", text)
-            self.assertIn("不覆盖同日修订", text)
+            self.assertIn("schema_version=1.3", text)
+            self.assertIn("coverage_contract=daily_required_v1", text)
+            self.assertIn("同日修订继续原修订流程", text)
             self.assertIn("私有任务目录", text)
-            self.assertIn("停止发布", text)
+            self.assertIn("not_checked", text)
+            self.assertIn("原授权继续", text)
         audit = (PROMPTS / "audit.md").read_text(encoding="utf-8")
         self.assertIn("unavailable_reason", audit)
         self.assertIn("delivery_allowed=false", audit)
@@ -103,7 +104,7 @@ class PromptRuleTests(unittest.TestCase):
         self.assertGreater(len(links), 15)
         hosts = {"github.com", "huggingface.co", "www.nvidia.com", "developer.nvidia.com",
                  "docs.nvidia.com", "qwen.ai", "ai.google.dev", "vllm.ai", "www.sglang.io",
-                 "www.lmsys.org", "www.deepseek.com"}
+                 "www.lmsys.org", "www.deepseek.com", "z.ai", "qwenlm.github.io"}
         for link in links:
             parsed = urlsplit(link)
             self.assertEqual(parsed.scheme, "https")
@@ -136,7 +137,8 @@ class PromptRuleTests(unittest.TestCase):
         editor = (PROMPTS / "editor.md").read_text(encoding="utf-8")
         self.assertIn("高价值的引擎技术文章可以作为技术洞察主文", editor)
         self.assertIn("同一事件只出现一次", editor)
-        self.assertIn("三个栏目都保留", editor)
+        self.assertIn("三个小节都保留", editor)
+        self.assertIn("article-id=inference-engines", editor)
         self.assertIn("相对历史报道的实质增量", editor)
 
     def test_article_rules_preserve_metric_and_publication_time_boundaries(self):

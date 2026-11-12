@@ -1,4 +1,4 @@
-# AI Infra 官方数据源目录 v1.1
+# AI Infra 官方数据源目录 v1.2
 
 本目录供研究 Prompt 在每次真实研究前读取；是公开一手来源的发现入口，不是已经抓取的数据集。与 research.md、editor.md 一起版本管理，并读取同一仓库 ref。初次核验日期：2026-10-30；博客与技术文章入口补充核验于 2026-11-06。后续仍须检查页面可读性、官方归属和实际发布时间，不能把本次核验当成永久可用保证。
 
@@ -10,7 +10,7 @@
 - 官方源也可能只有营销或缺少实验条件；“官方”不是自动入选理由。二手文章只作线索，不替代一手核验；论文须确认作者/项目归属，不能把整个论文分类订阅都当相关证据。
 - 静态产品页和指南用于核对规格/兼容性，不因当天读取或页面更新就算新事件。博客、PR、release、模型卡的发布时间分别核实；PR 创建、合并与发布版本的日期不可互换。
 - 博客/技术文章与 release/PR/commit 分开记录覆盖结果；只检查代码仓库不能声称博客已检查。每次记录读取成功、无合格变化、尚未读取或读取失败；迁移/失效时回到官方入口确认，不静默替换为第三方镜像。目录不可读、网络失败与无合格新项分别处理。
-- 按 research.md 的 24 → 72 → 168 小时窗口和历史去重筛选；每次固定核查 vLLM、SGLang 官方博客，以及 DeepSeek/DeepInfer 的官方技术文章与三个引擎的代码变动。选题按技术价值和需求相关性排序，有机制与实测的技术文章可以优先于零散 PR/commit；表中来源都不是固定产出配额。
+- 按 research.md 的 24 → 72 → 168 小时窗口和历史去重筛选；每次固定核查 vLLM、SGLang、LMSYS、GLM、Qwen 官方博客，DeepSeek/DeepInfer 官方技术文章、三个引擎代码变动，以及 GLM/DeepSeek/Qwen 模型入口；同时完成模型服务与超配、硬件、模型架构、具身训练、小模型、推理引擎六个方向的发现。选题按技术价值和需求相关性排序，有机制与实测的技术文章可以优先于零散 PR/commit；表中来源都不是固定产出配额。
 
 ## 官方入口与适用边界
 
@@ -22,13 +22,16 @@
 | `tensorrt_llm` | [TensorRT-LLM 发布记录](https://github.com/NVIDIA/TensorRT-LLM/releases) | NVIDIA 推理优化及可替代方案；确认模型、GPU、版本和对比负载。 |
 | `vllm_blog` | [vLLM 官方博客](https://vllm.ai/blog) · [完整归档](https://vllm.ai/blog/archive) | 固定核查机制、算子/库接入、融合、并行与服务性能技术文章；从正文追溯实现和 benchmark。当前文章可经页面的 View Markdown Source 核对 front matter 发布时间，不用 Git 提交时间代替。 |
 | `sglang_blog` | [SGLang 官方博客](https://www.sglang.io/blog) · [LMSYS 历史博客](https://www.lmsys.org/blog/) | 固定核查内核融合、推测解码、缓存与端到端服务分析；历史入口作为补充，需确认作者与项目归属。区分真实生成、固定接受长度模拟和只计 decode 的测量。 |
+| `lmsys_blog` | [LMSYS 博客](https://www.lmsys.org/blog/) | 与 SGLang 当前博客分别核查、按事件去重；确认作者和项目归属。 |
 | `deepseek_research` | [DeepSeek 研究与动态](https://www.deepseek.com/news/) | 固定核查官方技术文章、模型机制和发布说明，沿正文读取原始论文与实现。API 生效时间不等于文章发布时间，发布权重不自动入选。 |
 | `deepseek_infra_articles` | [DeepSeek 官方基础设施文章索引](https://github.com/deepseek-ai/open-infra-index) | 固定核查系统设计、算子库与推理基础设施文章，沿索引进入具体论文、技术说明和官方项目；索引年月或仓库更新时间不是文章精确发布时间。 |
-| `vllm` | [发布](https://github.com/vllm-project/vllm/releases) · [PR](https://github.com/vllm-project/vllm/pulls) · [提交](https://github.com/vllm-project/vllm/commits) | 独立每日栏目：KV/状态、调度、适配、内核、正确性及性能回归；区分提案、合并和已发布。 |
-| `sglang` | [发布](https://github.com/sgl-project/sglang/releases) · [PR](https://github.com/sgl-project/sglang/pulls) · [提交](https://github.com/sgl-project/sglang/commits) | 独立每日栏目：缓存、分离部署、内核与新架构；不照抄全部 changelog。 |
-| `deepinfer` | [DeepInfer 官方仓库](https://github.com/deepseek-ai/DeepInfer) · [PR](https://github.com/deepseek-ai/DeepInfer/pulls) · [提交](https://github.com/deepseek-ai/DeepInfer/commits) | 独立每日栏目及官方技术说明入口：以当前 README、关联技术文章和实现支持矩阵核对 GPU、模型和离线/在线边界；不假定有稳定发布包或完整在线 KV/调度系统。 |
+| `vllm` | [发布](https://github.com/vllm-project/vllm/releases) · [PR](https://github.com/vllm-project/vllm/pulls) · [提交](https://github.com/vllm-project/vllm/commits) | 统一引擎文章内的小节：KV/状态、调度、适配、内核、正确性及性能回归；区分提案、合并和已发布。 |
+| `sglang` | [发布](https://github.com/sgl-project/sglang/releases) · [PR](https://github.com/sgl-project/sglang/pulls) · [提交](https://github.com/sgl-project/sglang/commits) | 统一引擎文章内的小节：缓存、分离部署、内核与新架构；不照抄全部 changelog。 |
+| `deepinfer` | [DeepInfer 官方仓库](https://github.com/deepseek-ai/DeepInfer) · [PR](https://github.com/deepseek-ai/DeepInfer/pulls) · [提交](https://github.com/deepseek-ai/DeepInfer/commits) | 统一引擎文章内的小节及官方技术说明入口：以当前 README、关联技术文章和实现支持矩阵核对 GPU、模型和离线/在线边界；不假定有稳定发布包或完整在线 KV/调度系统。 |
+| `glm_blog` | [Z.ai 官方技术文章](https://z.ai/blog) · [官方站点目录](https://z.ai/sitemap.xml) | 与模型卡分别核查。入口返回 404、动态空壳或目录不完整时保留实际失败；从官方目录定位并读取具体文章。搜索摘要只作线索，旧文章不能证明当前窗口查全。 |
 | `glm` | [zai-org 官方项目](https://github.com/zai-org) · [官方模型卡](https://huggingface.co/zai-org) | 从组织入口定位具体 GLM 模型、配置、报告与实现；核对架构及引擎适配，不将全组织动态入选。 |
 | `deepseek_models` | [DeepSeek 官方项目](https://github.com/deepseek-ai) · [官方模型卡](https://huggingface.co/deepseek-ai) | 注意力/缓存机制、MoE、草稿验证和新架构；模型声明不等于三引擎均已实现。 |
+| `qwen_blog` | [Qwen 官方博客](https://qwen.ai/blog) · [历史官方博客](https://qwenlm.github.io/blog/) | 独立记录当前窗口的文章覆盖。历史站已提示迁移，新站不可读时模型卡只能补模型事实，不能代替博客覆盖或证明没有文章。 |
 | `qwen` | [Qwen 官方项目](https://github.com/QwenLM) · [官方模型卡](https://huggingface.co/Qwen) · [官方博客](https://qwen.ai/blog) | 新架构、部署与小模型；旧博客已提示迁移至 qwen.ai。新站正文不可读时明确记录，并以可读的官方模型卡/代码补证，不宣称该入口已检索成功。 |
 | `lmcache` | [LMCache 官方仓库](https://github.com/LMCache/LMCache) | KV 生命周期、卸载、传输及引擎集成；不能据此推断不同模型可任意共享 KV。 |
 | `isaac_gr00t` | [Isaac-GR00T 官方仓库](https://github.com/NVIDIA/Isaac-GR00T) | 具身训练/数据效率与部署资源；区分实验室、仿真、真实机器人及工厂证据。 |

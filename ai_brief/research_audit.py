@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from .contracts import parse_time, validate
 from .storage import BriefError
+from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 
 
 MAX_FILE_BYTES = 2_000_000
@@ -97,6 +98,7 @@ def _validate_audit(directory):
     except BriefError as exc:
         # 不把完整候选、摘录或私人路径回显到运行日志。
         raise BriefError("Invalid research-audit metadata schema") from exc
+    complete_contract = metadata["schema_version"] == "1.3"
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
         _require(hashlib.sha256(read(f"prompts/{name}")).hexdigest() == expected, "Prompt fingerprint mismatch")
     history_bytes = read("history.json")
@@ -171,6 +173,10 @@ def _validate_audit(directory):
         operation_budget(source, "source", index)
         if source["status"] == "ok":
             _require(source["content_sha256"] is not None and not source["error"], "Successful source needs content fingerprint and no error")
+        else:
+            _require((complete_contract or source["content_sha256"] is None) and bool(source["error"].strip()),
+                     "Failed source needs an error, not a successful content fingerprint")
+        if source["content_sha256"] is not None:
             # 原始来源可能超过元数据的单文件上限；总包预算仍约束完整原字节。
             content = read(f"evidence/{identity}.txt", MAX_PACKAGE_BYTES)
             _require(hashlib.sha256(content).hexdigest() == source["content_sha256"], "Source content fingerprint mismatch")
@@ -178,21 +184,42 @@ def _validate_audit(directory):
                 source_text[identity] = content.decode("utf-8")
             except UnicodeError as exc:
                 raise BriefError("Evidence must be the actual UTF-8 text read from the source") from exc
-            _require(bool(source_text[identity].strip()), "Successful source evidence is empty")
-        else:
-            _require(source["content_sha256"] is None and bool(source["error"].strip()), "Failed source needs an error, not a successful content fingerprint")
+            if source["status"] == "ok":
+                _require(bool(source_text[identity].strip()), "Successful source evidence is empty")
 
     def references(ids):
         _require(len(ids) == len(set(ids)) and all(i in sources for i in ids), "Source references must be unique and known")
         return [sources[i] for i in ids]
 
     allow_partial = metadata.get("coverage_policy") == "publish_verified_with_gaps"
-    coverage_gaps = []
+    coverage_gaps, unchecked, checked = [], [], []
+    if complete_contract:
+        _require(metadata.get("coverage_contract") == CONTRACT and set(metadata["checks"]) == set(REQUIRED_CHECKS),
+                 "Daily coverage requires every research direction and official source group")
     for name, check in metadata["checks"].items():
         linked = references(check["source_ids"])
+        matching = [s for s in linked if source_matches(name, s["url"])] if complete_contract else linked
         if check["status"] in {"checked", "no_qualifying_items"}:
-            _require(any(s["status"] == "ok" for s in linked), "Completed coverage needs a successful source read")
+            _require(any(s["status"] == "ok" and (not complete_contract or s["attempts"] > 0) for s in matching),
+                     "Completed coverage needs a successful source read from its required source group")
+            if complete_contract:
+                _require("failure_kind" not in check, "Completed coverage cannot claim a source failure")
+            checked.append(name)
+        elif complete_contract and check["status"] == "not_checked":
+            unchecked.append(name)
+            blockers.append("required_coverage_not_checked")
         else:
+            if complete_contract:
+                _require(check.get("failure_kind") in FAILURE_KINDS and matching and all(s["attempts"] > 0 for s in matching),
+                         "Failed coverage requires an attempted matching source and explicit failure kind")
+                if check["failure_kind"] in {"transport", "access_denied"}:
+                    statuses = {"failed", "timeout"} if check["failure_kind"] == "transport" else {"failed"}
+                    _require(any(s["status"] in statuses for s in matching), "Access failure needs a failed source record")
+                elif check["failure_kind"] == "unusable_response":
+                    _require(any(s["status"] == "failed" and s["content_sha256"] is not None for s in matching),
+                             "Unusable response needs retained failed-source bytes")
+                else:
+                    _require(any(s["content_sha256"] is not None for s in matching), "Unusable or incomplete response needs retained source bytes")
             coverage_gaps.append(name)
             if allow_partial:
                 warnings.append({"code": "coverage_incomplete", "path": f"checks.{name}"})
@@ -258,7 +285,7 @@ def _validate_audit(directory):
     if allow_partial and coverage_gaps:
         _require(notice is not None and set(notice["checks"]) == set(coverage_gaps),
                  "Coverage notice must disclose every incomplete check exactly once")
-        prefix = "部分晨报｜覆盖缺口：" + "、".join(COVERAGE_LABELS[name] for name in COVERAGE_LABELS if name in coverage_gaps) + "。"
+        prefix = notice_prefix(coverage_gaps) if complete_contract else "部分晨报｜覆盖缺口：" + "、".join(COVERAGE_LABELS[name] for name in COVERAGE_LABELS if name in coverage_gaps) + "。"
         _require(notice["text"].startswith(prefix) and bool(notice["text"][len(prefix):].strip()),
                  "Coverage notice needs the explicit partial-report heading and gap details")
         try:
@@ -316,6 +343,11 @@ def _validate_audit(directory):
     if metadata["schema_version"] != "1.0":
         # 摘要只含固定字段路径，不回显私有解释、来源地址或正文。
         result.update(warnings=warnings, budget_unknown=any(w["code"] == "timing_unavailable" for w in warnings))
-    if metadata["schema_version"] == "1.2":
+    if metadata["schema_version"] in {"1.2", "1.3"}:
         result["coverage_incomplete"] = sorted(coverage_gaps)
+    if complete_contract:
+        result.update(coverage_contract=CONTRACT, required_checks=list(REQUIRED_CHECKS),
+                      coverage_checked=sorted(checked), coverage_unchecked=sorted(unchecked), limits=dict(limits),
+                      inputs={key: metadata["inputs"][key] for key in
+                              ("prompt_commit", "history_commit", "prompt_hashes", "history_sha256", "draft_sha256")})
     return result
