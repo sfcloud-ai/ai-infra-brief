@@ -126,15 +126,17 @@ def parse_article_text(text, base):
     for number, section in enumerate(sections[1:], 1):
         lines = section.split("\n")
         require(len(lines) == 2)
-        url = re.fullmatch(re.escape(base + day + "/") + r"r([1-9]\d*)/([a-z0-9][a-z0-9-]{0,79})/", lines[1])
+        url = re.fullmatch(re.escape(base + day + "/") + r"(?:r([1-9]\d*)/)?([a-z0-9][a-z0-9-]{0,79})/", lines[1])
         require(url is not None)
-        current = int(url[1])
-        if revision is None:
+        current = int(url[1]) if url[1] else None
+        if not articles:
             revision = current
         require(revision == current)
         articles.append({"id": url[2], "title": lines[0], "url": lines[1]})
-    require(article_text(day, revision, articles, base) == text)
-    return {"date": day, "revision": revision, "articles": articles, "index_url": f"{base}{day}/r{revision}/"}
+    stable = revision is None
+    require(article_text(day, revision or 1, articles, base, stable=stable) == text)
+    return {"date": day, "revision": revision, "articles": articles,
+            "index_url": f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"}
 
 
 def match_manifest(candidate, manifest, base):
@@ -275,16 +277,20 @@ class NoticeManifestReader:
     def _read(self, candidate):
         identity = parse_article_text(candidate["text"], self.base)
         require(candidate["url"] == identity["index_url"])
-        edition = f"{identity['date']}/r{identity['revision']}"
+        stable = identity["revision"] is None
+        root = identity['date'] if stable else f"{identity['date']}/r{identity['revision']}"
         try:
             before = self.read_json(self.base + "publication.json", 1048576)
             exact(before, ["schema_version", "commit", "preview", "reports"])
             require(before["schema_version"] == "1.0" and before["preview"] is False
                     and isinstance(before["commit"], str) and SHA.fullmatch(before["commit"])
-                    and isinstance(before["reports"], list) and edition in before["reports"])
-            manifest = self.read_json(self.base + "reports/" + edition + "/notice.json", MAX_MANIFEST_BYTES)
+                    and isinstance(before["reports"], list))
+            manifest = self.read_json(self.base + "reports/" + root + "/notice.json", MAX_MANIFEST_BYTES)
             validate_manifest(manifest, self.base)
-            require(manifest["commit"] == before["commit"])
+            edition = f"{manifest['date']}/r{manifest['revision']}"
+            require(manifest["commit"] == before["commit"] and edition in before["reports"]
+                    and manifest["date"] == identity["date"] and manifest["index_url"] == identity["index_url"]
+                    and (stable or manifest["revision"] == identity["revision"]))
             after = self.read_json(self.base + "publication.json", 1048576)
             require(before == after)
             return manifest

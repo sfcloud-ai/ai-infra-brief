@@ -67,11 +67,12 @@ class StableFormatTests(unittest.TestCase):
         _, _, legacy = package(stable=False, stable_source=False)
         with self.assertRaises(ValueError): n.bundle_poster(data, legacy, BASE)
 
-    def test_stable_key_is_scheduler_only_and_strict(self):
+    def test_current_key_requires_explicit_delivery_context_and_remains_strict(self):
         data, _, manifest = package()
         self.assertEqual(scheduled_notice_day(manifest["index_url"], PROFILE), "2026-11-01")
         with self.assertRaises(relay.RelayError): relay.notice_url_day(manifest["index_url"], PROFILE)
-        with self.assertRaises(ValueError): n.parse_article_text(manifest["text"], BASE)
+        self.assertEqual(relay.notice_url_day(manifest["index_url"], PROFILE, allow_current=True), "2026-11-01")
+        self.assertEqual(n.parse_article_text(manifest["text"], BASE)['index_url'], manifest['index_url'])
         for suffix in ("2026-11-01", "2026-02-30/", "2026-11-01/?r=1", "2026-11-01/#x", "2026-11-01/r0/", "2026-11-01/memory/", "2026-11-01//"):
             with self.subTest(suffix=suffix), self.assertRaises((ValueError, relay.RelayError)): scheduled_notice_day(BASE + suffix, PROFILE)
         for revision in (1, 2):

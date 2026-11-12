@@ -126,6 +126,29 @@ class ArticleContractTests(unittest.TestCase):
 
 
 class ManifestReadTests(unittest.TestCase):
+    def test_current_date_notice_resolves_revision_from_published_manifest(self):
+        data = report(); data['revision'] = 2
+        current = n.build_manifest(data, PROFILE['report_base_url'], 'b' * 64, COMMIT, stable=True)
+        candidate = r._connector_candidate(message(edition=current), PROFILE, CONFIG['team_id'], CONFIG['channel_id'])
+        publication = {'schema_version': '1.0', 'commit': COMMIT, 'preview': False, 'reports': ['2026-11-01/r2']}
+        calls = []
+        def read(url, limit):
+            calls.append(url)
+            return deepcopy(publication if url.endswith('publication.json') else current)
+        observed = n.NoticeManifestReader(PROFILE['report_base_url'], read).read(candidate)
+        self.assertEqual(r._bind_notice_manifest(candidate, observed, PROFILE)['text'], current['text'])
+        self.assertEqual(calls[1], PROFILE['report_base_url'] + 'reports/2026-11-01/notice.json')
+        for bad in ('2026-11-01/r1', '2026-11-02/r2'):
+            publication['reports'] = [bad]
+            with self.assertRaises(n.NoticeReadError):
+                n.NoticeManifestReader(PROFILE['report_base_url'], read).read(candidate)
+
+    def test_mixed_current_and_revision_urls_are_rejected_in_either_order(self):
+        text = manifest()['text']
+        for old in ('r1/memory/', 'r1/service/'):
+            with self.assertRaises(ValueError):
+                n.parse_article_text(text.replace(old, old[3:]), PROFILE['report_base_url'])
+
     def test_only_fixed_public_paths_and_stable_commit(self):
         calls = []
         publication = {"schema_version": "1.0", "commit": COMMIT, "preview": False, "reports": ["2026-11-01/r1"]}
@@ -233,6 +256,25 @@ class ArticleDeliveryTests(unittest.TestCase):
         self.store.set("cursor", ts(0)); self.store.set("handoff_binding_v1", resume.binding(NOTICE_CONFIG))
         receiver.connected = True
         return receiver
+
+    def test_full_current_revision_repeat_preserves_original_receipt_and_sends_text_and_image_once(self):
+        receiver = self.receiver(); self.slack.messages = [message(1)]; receiver.poll()
+        original = deepcopy(self.store.status('auto:' + ts(1)))
+        data = report(); data['revision'] = 2
+        current = n.build_manifest(data, PROFILE['report_base_url'], 'b' * 64, COMMIT, stable=True)
+        receiver = self.receiver(expected=current); self.slack.messages = [message(2, current)]
+        # 新 URL 仍使用原日期的去重键。
+        receiver.poll()
+        self.assertEqual(len(self.wecom.sent), 1)
+        self.assertEqual(len(self.images), 1)
+        payload = {'request_id': 'reviewed-correction-r2', 'message_ts': ts(2),
+                   'allow_repeat': True, 'reason': 'Explicitly requested full correction'}
+        result = receiver.dispatch('/manual/slack-message', payload, os.getuid())
+        self.assertEqual((result['status'], result['parts_sent'], result['parts_total']), ('sent', 2, 2))
+        self.assertEqual(len(self.wecom.sent), 2); self.assertEqual(len(self.images), 2)
+        self.assertEqual(receiver.dispatch('/manual/slack-message', payload, os.getuid()), result)
+        self.assertEqual(len(self.wecom.sent), 2); self.assertEqual(len(self.images), 2)
+        self.assertEqual(self.store.status('auto:' + ts(1)), original)
 
     def test_read_outage_keeps_cursor_and_pending_message_then_sends_once(self):
         receiver = self.receiver(fail_first=True); self.slack.messages = [message()]

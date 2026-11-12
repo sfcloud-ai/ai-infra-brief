@@ -133,10 +133,11 @@ def validate_notice_connector(profile):
     return profile
 
 
-def notice_url_day(url, profile):
+def notice_url_day(url, profile, *, allow_current=False):
     if not isinstance(url, str):
         raise RelayError("notice_url_rejected")
-    match = re.fullmatch(re.escape(profile["report_base_url"]) + r"(\d{4}-\d{2}-\d{2})/r([1-9]\d*)/", url)
+    suffix = r"(?:r([1-9]\d*)/)?" if allow_current else r"r([1-9]\d*)/"
+    match = re.fullmatch(re.escape(profile["report_base_url"]) + r"(\d{4}-\d{2}-\d{2})/" + suffix, url)
     try:
         valid = match and date.fromisoformat(match[1]).isoformat() == match[1]
     except ValueError:
@@ -887,7 +888,7 @@ class Relay:
         if notice_key is not None:
             if not isinstance(timestamp, str) or not TS.fullmatch(timestamp):
                 raise RelayError("notice_source_timestamp_required")
-            report_date = notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")))
+            report_date = notice_url_day(notice_key, validate_notice_connector(self.config.get("notice_connector")), allow_current=True)
             day_key = "notice_day:" + digest([self.config["team_id"], self.config["channel_id"], report_date])
             edition = "notice_edition:" + digest([self.config["team_id"], self.config["channel_id"], notice_key])
         db = self.store.db
