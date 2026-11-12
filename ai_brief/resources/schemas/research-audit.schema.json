@@ -8,7 +8,8 @@
       "enum": [
         "1.0",
         "1.1",
-        "1.2"
+        "1.2",
+        "1.3"
       ]
     },
     "date": {
@@ -252,250 +253,7 @@
       "maxItems": 500
     },
     "checks": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "vllm": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "sglang": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "deepinfer": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "vllm_blog": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "sglang_blog": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "deepseek_articles": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        },
-        "deepinfer_articles": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "enum": [
-                "checked",
-                "no_qualifying_items",
-                "failed",
-                "not_checked"
-              ]
-            },
-            "source_ids": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
-              },
-              "maxItems": 30
-            },
-            "reason": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 2000,
-              "pattern": "\\S"
-            }
-          },
-          "required": [
-            "status",
-            "source_ids",
-            "reason"
-          ]
-        }
-      },
-      "required": [
-        "vllm",
-        "sglang",
-        "deepinfer",
-        "vllm_blog",
-        "sglang_blog",
-        "deepseek_articles",
-        "deepinfer_articles"
-      ]
+      "type": "object"
     },
     "decisions": {
       "type": "array",
@@ -766,17 +524,29 @@
               "type": "array",
               "items": {
                 "enum": [
+                  "model_serving",
+                  "hardware",
+                  "model_architecture",
+                  "embodied_training",
+                  "small_models",
+                  "inference_engines",
                   "vllm",
                   "sglang",
                   "deepinfer",
                   "vllm_blog",
                   "sglang_blog",
+                  "lmsys_blog",
                   "deepseek_articles",
-                  "deepinfer_articles"
+                  "deepinfer_articles",
+                  "glm_blog",
+                  "qwen_blog",
+                  "glm_models",
+                  "deepseek_models",
+                  "qwen_models"
                 ]
               },
               "minItems": 1,
-              "maxItems": 7,
+              "maxItems": 19,
               "uniqueItems": true
             },
             "text": {
@@ -792,6 +562,9 @@
           ]
         }
       ]
+    },
+    "coverage_contract": {
+      "const": "daily_required_v1"
     }
   },
   "required": [
@@ -856,7 +629,10 @@
       "if": {
         "properties": {
           "schema_version": {
-            "const": "1.2"
+            "enum": [
+              "1.2",
+              "1.3"
+            ]
           }
         }
       },
@@ -893,6 +669,175 @@
                   ]
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": "1.3"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "coverage_contract"
+        ],
+        "properties": {
+          "checks": {
+            "type": "object",
+            "propertyNames": {
+              "enum": [
+                "model_serving",
+                "hardware",
+                "model_architecture",
+                "embodied_training",
+                "small_models",
+                "inference_engines",
+                "vllm",
+                "sglang",
+                "deepinfer",
+                "vllm_blog",
+                "sglang_blog",
+                "lmsys_blog",
+                "deepseek_articles",
+                "deepinfer_articles",
+                "glm_blog",
+                "qwen_blog",
+                "glm_models",
+                "deepseek_models",
+                "qwen_models"
+              ]
+            },
+            "required": [
+              "model_serving",
+              "hardware",
+              "model_architecture",
+              "embodied_training",
+              "small_models",
+              "inference_engines",
+              "vllm",
+              "sglang",
+              "deepinfer",
+              "vllm_blog",
+              "sglang_blog",
+              "lmsys_blog",
+              "deepseek_articles",
+              "deepinfer_articles",
+              "glm_blog",
+              "qwen_blog",
+              "glm_models",
+              "deepseek_models",
+              "qwen_models"
+            ],
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "checked",
+                    "no_qualifying_items",
+                    "failed",
+                    "not_checked"
+                  ]
+                },
+                "source_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                  },
+                  "maxItems": 30
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "pattern": "\\S"
+                },
+                "failure_kind": {
+                  "enum": [
+                    "transport",
+                    "access_denied",
+                    "unusable_response",
+                    "incomplete_listing"
+                  ]
+                }
+              },
+              "required": [
+                "status",
+                "source_ids",
+                "reason"
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "coverage_contract"
+          ]
+        },
+        "properties": {
+          "checks": {
+            "type": "object",
+            "propertyNames": {
+              "enum": [
+                "vllm",
+                "sglang",
+                "deepinfer",
+                "vllm_blog",
+                "sglang_blog",
+                "deepseek_articles",
+                "deepinfer_articles"
+              ]
+            },
+            "required": [
+              "vllm",
+              "sglang",
+              "deepinfer",
+              "vllm_blog",
+              "sglang_blog",
+              "deepseek_articles",
+              "deepinfer_articles"
+            ],
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "status": {
+                  "enum": [
+                    "checked",
+                    "no_qualifying_items",
+                    "failed",
+                    "not_checked"
+                  ]
+                },
+                "source_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                  },
+                  "maxItems": 30
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "status",
+                "source_ids",
+                "reason"
+              ]
             }
           }
         }
