@@ -44,7 +44,8 @@ def fixture():
     data = json.dumps(value).encode()
     manifest = n.build_manifest(report, PROFILE["report_base_url"], sha(metadata), COMMIT)
     m = message(edition=manifest)
-    m["files"][0].update(name=n.BUNDLE_FILENAME, mimetype="text/plain", filetype="json", size=len(data))
+    # Slack 将原生 JSON 文件标成 snippet；后续仍下载并校验完整原字节。
+    m["files"][0].update(name=n.BUNDLE_FILENAME, mimetype="text/plain", filetype="json", mode="snippet", size=len(data))
     return data, poster, manifest, m
 
 
@@ -90,8 +91,10 @@ class BundleContractTests(unittest.TestCase):
         self.assertIn(b"caBX", poster)
         self.assertEqual(r.validate_image(poster, "image/png"), r.validate_image(PNG, "image/png"))
         self.assertNotEqual(sha(poster), sha(PNG))
-        plan = r.connector_notice(m, PROFILE, "TTEST", "DFIXED", notice_manifest=manifest)["images"][0]
-        self.assertEqual(r.original_bundle_poster(data, plan), poster)
+        for mode in ("hosted", "snippet"):
+            m["files"][0]["mode"] = mode
+            plan = r.connector_notice(m, PROFILE, "TTEST", "DFIXED", notice_manifest=manifest)["images"][0]
+            self.assertEqual(r.original_bundle_poster(data, plan), poster)
 
     def test_bundle_cannot_change_source_metadata_paths_or_original_bytes(self):
         data, _, manifest, _ = fixture()
@@ -116,7 +119,7 @@ class BundleContractTests(unittest.TestCase):
 
     def test_untrusted_json_metadata_is_rejected_before_download(self):
         _, _, manifest, original = fixture()
-        for changes in ({"name": "other.json"}, {"mimetype": "image/png"}, {"filetype": "txt"}, {"mode": "snippet"},
+        for changes in ({"name": "other.json"}, {"mimetype": "image/png"}, {"filetype": "txt"}, {"mode": "external"}, {"mode": None},
                         {"file_access": "check_file_info"}, {"is_external": True}, {"size": n.MAX_BUNDLE_BYTES + 1},
                         {"user": "UOTHER"}, {"user_team": "TOTHER"}, {"url_private": "https://evil.example/data"}):
             m = deepcopy(original); m["files"][0].update(changes)

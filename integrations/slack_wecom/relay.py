@@ -287,7 +287,7 @@ def bundle_attachment(item, team_id):
         file_id, size, mime = item.get("id"), item.get("size"), item.get("mimetype")
         if (not isinstance(file_id, str) or not re.fullmatch(r"F[A-Z0-9]{1,64}", file_id)
                 or item.get("name") != notice_format.BUNDLE_FILENAME or item.get("filetype") != "json"
-                or mime not in ("text/plain", "application/json") or item.get("mode") != "hosted"
+                or mime not in ("text/plain", "application/json") or item.get("mode") not in ("hosted", "snippet")
                 or item.get("file_access") != "visible" or item.get("is_external") is not False
                 or item.get("user_team") != team_id or type(size) is not int
                 or not 0 < size <= notice_format.MAX_BUNDLE_BYTES):
