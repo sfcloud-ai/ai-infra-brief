@@ -67,3 +67,5 @@
 - 核验当前修订自己的原始回执。`revision_update` 的真实完成是文字 `1/1`、无图片；`web_only / skipped` 是政策决定，并非已发送。发送结果未知时对账原请求；后续独立晨报继续按既有授权推进。
 
 此通知合同不扩大 `new_daily` 私有审计的适用范围，也不把未核验内容变成可发布事实。完整格式见报告仓库的 [同日修订通知](https://github.com/sfcloud-ai/ai-infra-reports/blob/main/docs/revision-notifications.md)。
+
+新版已部署且 T4 原计划为 `research_plan_v4`，或旧 `research_plan_v3` 已取得绑定原请求与原计划哈希的有效恢复授权、由 T4 返回分层 effective_budget 时，使用 `schema_version=1.4` 分层预算合同，保持 `daily_required_v1` 全部覆盖要求。无此授权的旧计划仍按原版本执行。获准恢复也不改写旧计划、固定仓库输入、原失败或历史预算记录；新增实际输入和结果以新的哈希归档并保留前次链。模型阶段开始前固定完整实际输入；结束即固定结果与结束时间，协调和归档时间计入整轮而不混作模型阶段。有限恢复遵循原 T4 操作与剩余额度，不丢弃失败记录、不重开预算。

@@ -12,6 +12,8 @@ from .storage import BriefError
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 
 
+# 仅容纳新版真实计时求和的浮点误差，不修改预留声明、次数或原始耗时。
+LAYERED_TIME_TOLERANCE = 1e-6
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
 SELECTED = {"selected", "update"}
@@ -78,9 +80,14 @@ def _validate_audit(directory):
     """只读检查；通过不等于证实事实或允许公开私有材料。"""
     root = Path(directory).resolve(strict=True)
     total = 0
+    read_cache = {}
 
     def read(relative, max_bytes=MAX_FILE_BYTES):
         nonlocal total
+        if relative in read_cache:
+            data = read_cache[relative]
+            _require(len(data) <= max_bytes, "Audit file exceeds size limit")
+            return data
         path = root / relative
         _require(not path.is_symlink() and not path.parent.is_symlink(), "Audit files must not be symlinks")
         _require(path.is_file(), f"Missing audit file: {relative}")
@@ -90,6 +97,7 @@ def _validate_audit(directory):
             data = stream.read(remaining + 1)
         total += len(data)
         _require(len(data) <= max_bytes and total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
+        read_cache[relative] = data
         return data
 
     metadata = _json(read("audit.json"), "audit")
@@ -98,7 +106,8 @@ def _validate_audit(directory):
     except BriefError as exc:
         # 不把完整候选、摘录或私人路径回显到运行日志。
         raise BriefError("Invalid research-audit metadata schema") from exc
-    complete_contract = metadata["schema_version"] == "1.3"
+    layered_budget = metadata["schema_version"] == "1.4"
+    complete_contract = metadata["schema_version"] in {"1.3", "1.4"}
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
         _require(hashlib.sha256(read(f"prompts/{name}")).hexdigest() == expected, "Prompt fingerprint mismatch")
     history_bytes = read("history.json")
@@ -143,12 +152,17 @@ def _validate_audit(directory):
     blockers = []
     warnings = []
     run_elapsed = (finished - started).total_seconds()
-    if run_elapsed > limits["run_seconds"]:
+    if not layered_budget and run_elapsed > limits["run_seconds"]:
         blockers.append("run_budget_exceeded")
+
+    accounting = {"successful_attempts": {"source": 0, "model": 0},
+                  "successful_seconds": 0, "failed_attempts": {"source": 0, "model": 0},
+                  "failed_seconds": 0, "unknown_attempts": {"source": 0, "model": 0},
+                  "reserved_unknown_seconds": 0, "charged_seconds": 0}
 
     def operation_budget(record, kind, index):
         # 缺计时不等于零耗时，也不豁免真实尝试次数或已知的超限。
-        if record["attempts"] > limits[f"{kind}_attempts"]:
+        if not layered_budget and record["attempts"] > limits[f"{kind}_attempts"]:
             blockers.append(f"{kind}_budget_exceeded")
         elapsed = record["elapsed_seconds"]
         label = "Source" if kind == "source" else "Model"
@@ -156,8 +170,67 @@ def _validate_audit(directory):
             collection = "sources" if kind == "source" else "model_calls"
             warnings.append({"code": "timing_unavailable", "path": f"{collection}[{index}].elapsed_seconds"})
         else:
-            _require(elapsed <= run_elapsed, f"{label} duration exceeds recorded run interval")
-            if elapsed > limits["operation_seconds"]:
+            _require(elapsed <= run_elapsed + (LAYERED_TIME_TOLERANCE if layered_budget else 0), f"{label} duration exceeds recorded run interval")
+            if not layered_budget and elapsed > limits["operation_seconds"]:
+                blockers.append(f"{kind}_budget_exceeded")
+        if layered_budget:
+            attempts = record["attempt_records"]
+            _require(len(attempts) == record["attempts"], "Attempt count does not match retained records")
+            _require(attempts[-1]["status"] == record["status"], "Final attempt status mismatch")
+            known = 0
+            charged_attempts = 0
+            cap = limits["source_attempt_seconds" if kind == "source" else "model_stage_seconds"]
+            for number, attempt in enumerate(attempts):
+                duration = attempt["elapsed_seconds"]
+                _require(attempt["reserved_seconds"] <= cap, "Attempt reservation exceeds original kind limit")
+                _require(not attempt["error"] if attempt["status"] == "ok" else bool(attempt["error"].strip()),
+                         "Attempt outcome needs a consistent error")
+                if duration is None:
+                    collection = "sources" if kind == "source" else "model_calls"
+                    warnings.append({"code": "timing_unavailable", "path": f"{collection}[{index}].attempt_records[{number}].elapsed_seconds"})
+                else:
+                    known += duration
+                    _require(duration <= run_elapsed + LAYERED_TIME_TOLERANCE, "Attempt duration exceeds recorded run interval")
+                successful = attempt["status"] in {"ok", "partial"}
+                if attempt["status"] == "unknown" or duration is None:
+                    accounting["unknown_attempts"][kind] += 1
+                    accounting["reserved_unknown_seconds"] += max(attempt["reserved_seconds"], duration or 0)
+                    charged_attempts += 1
+                    if attempt["status"] == "unknown":
+                        blockers.append("operation_outcome_unknown")
+                elif successful:
+                    accounting["successful_attempts"][kind] += 1
+                    accounting["successful_seconds"] += duration
+                    charged_attempts += 1
+                    if duration > cap + LAYERED_TIME_TOLERANCE:
+                        blockers.append(f"{kind}_budget_exceeded")
+                else:
+                    accounting["failed_attempts"][kind] += 1
+                    accounting["failed_seconds"] += duration
+                if number:
+                    previous = attempts[number - 1]
+                    _require(previous["status"] in {"failed", "timeout"}, "Cannot retry an already completed or unknown attempt")
+                    _require(previous["elapsed_seconds"] is not None, "Unknown attempt cannot be replayed")
+                if kind == "model":
+                    _require(not successful or attempt["result_sha256"] is not None, "Successful model attempt requires its saved result")
+                    for field in ("input_sha256", "checkpoint_sha256", "result_sha256"):
+                        value = attempt[field]
+                        if value is not None:
+                            data = read(f"stage_artifacts/{value}.json", MAX_PACKAGE_BYTES)
+                            _require(hashlib.sha256(data).hexdigest() == value, "Model artifact fingerprint mismatch")
+                    if number:
+                        _require(previous["elapsed_seconds"] is not None, "Unknown model attempt cannot be replayed")
+                        _require(previous["result_sha256"] is not None
+                                 and attempt["checkpoint_sha256"] == previous["result_sha256"],
+                                 "Model recovery must retain the preceding result checkpoint")
+            _require(known <= run_elapsed + LAYERED_TIME_TOLERANCE, "Known sequential attempt durations exceed the run interval")
+            if elapsed is not None:
+                _require(all(a["elapsed_seconds"] is not None for a in attempts),
+                         "Known aggregate duration requires complete per-attempt timing; retain and reconcile the known timing evidence")
+                _require(elapsed + LAYERED_TIME_TOLERANCE >= known, "Cumulative duration is less than retained attempts")
+                if kind == "model":
+                    _require(abs(elapsed - known) <= LAYERED_TIME_TOLERANCE, "Model cumulative duration must equal retained attempt durations")
+            if charged_attempts > limits[f"{kind}_attempts"]:
                 blockers.append(f"{kind}_budget_exceeded")
 
     sources, source_text = {}, {}
@@ -336,6 +409,10 @@ def _validate_audit(directory):
                 _require(entry.get("update_of") is None, "Draft cannot introduce an unaudited update relationship")
         _require(set(entries) == selected | status_entries.keys(), "Draft must contain every selected event and coverage status exactly once")
 
+    if layered_budget:
+        accounting["charged_seconds"] = accounting["successful_seconds"] + accounting["reserved_unknown_seconds"]
+        if accounting["charged_seconds"] > limits["run_seconds"] + LAYERED_TIME_TOLERANCE:
+            blockers.append("run_budget_exceeded")
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
             "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected else "zero_items")),
             "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": len(selected),
@@ -343,11 +420,15 @@ def _validate_audit(directory):
     if metadata["schema_version"] != "1.0":
         # 摘要只含固定字段路径，不回显私有解释、来源地址或正文。
         result.update(warnings=warnings, budget_unknown=any(w["code"] == "timing_unavailable" for w in warnings))
-    if metadata["schema_version"] in {"1.2", "1.3"}:
+    if metadata["schema_version"] in {"1.2", "1.3", "1.4"}:
         result["coverage_incomplete"] = sorted(coverage_gaps)
     if complete_contract:
         result.update(coverage_contract=CONTRACT, required_checks=list(REQUIRED_CHECKS),
                       coverage_checked=sorted(checked), coverage_unchecked=sorted(unchecked), limits=dict(limits),
                       inputs={key: metadata["inputs"][key] for key in
                               ("prompt_commit", "history_commit", "prompt_hashes", "history_sha256", "draft_sha256")})
+    if layered_budget:
+        result.update(budget_accounting=accounting, run_elapsed_seconds=run_elapsed,
+                      budget_policy=metadata["budget_policy"])
+        result["budget_unknown"] = result["budget_unknown"] or any(accounting["unknown_attempts"].values())
     return result
