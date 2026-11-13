@@ -230,17 +230,21 @@ d.execute("PRAGMA query_only=ON")
 tables={r[0] for r in d.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 present=any(t in tables and d.execute("SELECT 1 FROM "+t+" LIMIT 1").fetchone() for t in ("scheduled_revision_notices","scheduled_supersessions"))
 present=present or ("requests" in tables and d.execute("SELECT 1 FROM requests WHERE mode='scheduled_revision' LIMIT 1").fetchone())
+pages=False
+for t in ("scheduled_notices","scheduled_revision_notices"):
+ if t in tables and "record" in {r[1] for r in d.execute("PRAGMA table_info("+t+")")}:
+  pages=pages or bool(d.execute("SELECT 1 FROM "+t+" WHERE json_type(record,'$.page_state') IS NOT NULL OR json_type(record,'$.plan.page_state') IS NOT NULL LIMIT 1").fetchone())
 d.close()
-print(int(bool(present)))
+print(2 if pages else int(bool(present)))
 '''
         def service_identity():
             if os.getuid() != self.config["uid"] or os.getgid() != self.config["gid"]:
                 os.setgroups([]); os.setgid(self.config["gid"]); os.setuid(self.config["uid"])
         output = subprocess.check_output([sys.executable, "-I", "-B", "-c", script, str(path)],
                                          preexec_fn=service_identity, timeout=15)
-        if output not in (b"0\n", b"1\n"):
+        if output not in (b"0\n", b"1\n", b"2\n"):
             raise ServiceError("revision_ledger_inspection_failed")
-        return output == b"1\n"
+        return int(output)
 
     def preflight_rollback(self, release):
         # 显式调度启用后，回滚也必须能继续识别同一账本与接口；停旧实例前检查。
@@ -463,10 +467,11 @@ print(int(bool(present)))
         if old and old["State"]["Running"]:
             raise ServiceError("legacy_sender_still_running")
         # 排空后重新检查，覆盖首次预检与停机之间新准入的修订；尚未挂载可写账本。
-        if self.revision_records_present():
+        revision_version = self.revision_records_present()
+        if revision_version:
             if getattr(self, "scheduler", None) is None:
                 raise ServiceError("revision_ledger_requires_scheduler")
-            self.scheduler.preflight(self, release, require_revision_notices=True)
+            self.scheduler.preflight(self, release, require_revision_notices=revision_version)
         if self.inspect(self.live["container"]):
             self.command(["rm", self.live["container"]])
         (self.activation / "active.json").unlink(missing_ok=True)

@@ -17,6 +17,12 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+if __package__:
+    from .page_delivery import validate_progress, validate_correction
+else:
+    from page_delivery import validate_progress, validate_correction
+
+
 class RevisionDelivery:
     def __init__(self, parent, validate_plan):
         self.parent, self.db, self.validate = parent, parent.db, validate_plan
@@ -53,6 +59,10 @@ class RevisionDelivery:
         result = {**self.parent.store.status(request_id), **{k: plan[k] for k in ("report_date", "report_commit", "bundle_sha256")},
                   "phase": row[3], "next_attempt_at": row[5], "attempts": row[6], "last_error": row[7],
                   "delivery_kind": record["delivery_kind"], "report_revision": plan["revision_notice"]["revision"]}
+        result["images"] = [{"file_id": file_id, "status": status, "error": error}
+                            for file_id, status, error in self.db.execute("SELECT file_id,status,error_code FROM image_parts WHERE request_id=? ORDER BY ordinal", (request_id,))]
+        if "page_state" in plan:
+            result["page_state"] = plan["page_state"]
         result["covered_requests"] = [item["request_id"] for item in record["covered"]]
         if row[3] == "superseded":
             self.check_supersession(request_id, row[0])
@@ -79,6 +89,23 @@ class RevisionDelivery:
             if revisions and revisions[-1][1] >= notice["revision"]:
                 raise ValueError("revision_must_advance")
             original = self.db.execute("SELECT request_id,record,phase FROM scheduled_notices WHERE report_date=?", (day,)).fetchone()
+            if "page_state" in plan:
+                previous = plan["page_state"]["previous"]
+                if revisions and revisions[-1][0] != previous["request_id"]:
+                    raise ValueError("page_predecessor_must_be_latest")
+                candidates = [(original[0], original[1], original[2])] if original else []
+                candidates += [(rid, encoded, phase) for rid, _, encoded, phase in revisions]
+                predecessor = next((item for item in candidates if item[0] == previous["request_id"]), None)
+                # 结果未知、待处理或部分发送的页面不得转移到新请求。
+                if predecessor is None or predecessor[2] not in {"complete", "skipped"} or any(phase not in {"complete", "skipped", "superseded"} for _, _, phase in candidates):
+                    raise ValueError("page_predecessor_unresolved")
+                old = json.loads(predecessor[1])
+                old_plan = old.get("plan", old)
+                # 原始定时记录在顶层保存计划字段。
+                (validate_progress if notice["kind"] == "page_completion" else validate_correction)(old_plan, plan)
+                status = self.parent.store.status(previous["request_id"])
+                if not (status.get("status") == "sent" and status.get("parts_sent") == status.get("parts_total") or predecessor[2] == "skipped" and old.get("delivery_kind") == "web_only" and status.get("parts_sent") == status.get("parts_total") == 0):
+                    raise ValueError("page_predecessor_receipt_incomplete")
             day_key = "notice_day:" + relay.digest([self.parent.config["team_id"], self.parent.config["channel_id"], day])
             day_owner = self.parent.store.get(day_key)
             if day_owner and not original and not any(r[0] == day_owner for r in revisions) and not self.started(day_owner):
@@ -94,10 +121,10 @@ class RevisionDelivery:
                     covered.append({"request_id": rid, "record_sha256": hashlib.sha256(encoded.encode()).hexdigest()})
                     if notice["kind"] == "maintenance" and old["delivery_kind"] == "revision_update":
                         effective = old["effective_notice"]
-            kind = "initial" if not started else "web_only" if effective["kind"] == "maintenance" else "revision_update"
+            kind = "page_completion" if notice["kind"] == "page_completion" else "initial" if not started else "web_only" if effective["kind"] == "maintenance" else "revision_update"
             # 同一重要说明若已进入发送边界，后续版次不能借新 ID 重试未知结果。
             base = relay.validate_notice_connector(self.parent.config["notice_connector"])["report_base_url"]
-            text = plan["text"] if kind == "initial" else update_text(day, effective, base) if kind == "revision_update" else ""
+            text = plan["text"] if kind in {"initial", "page_completion"} else update_text(day, effective, base) if kind == "revision_update" else ""
             if kind == "revision_update" and any(phase in {"sending", "unknown"} and json.loads(encoded)["text"] == text for _, _, encoded, phase in revisions):
                 kind, text = "web_only", ""
             record = {"plan": plan, "delivery_kind": kind, "text": text, "effective_notice": effective, "covered": covered}
@@ -163,10 +190,19 @@ class RevisionDelivery:
             raise ValueError("revision_binding_differs")
         base = relay.validate_notice_connector(self.parent.config["notice_connector"])["report_base_url"]
         kind = record["delivery_kind"]
-        expected = plan["text"] if kind == "initial" else update_text(plan["report_date"], record["effective_notice"], base) if kind == "revision_update" else ""
+        if "page_state" in plan:
+            previous = plan["page_state"]["previous"]
+            prior = self.db.execute("SELECT record,phase FROM scheduled_notices WHERE request_id=?", (previous["request_id"],)).fetchone()
+            if prior is None:
+                prior = self.db.execute("SELECT record,phase FROM scheduled_revision_notices WHERE request_id=?", (previous["request_id"],)).fetchone()
+            if prior is None or prior[1] not in {"complete", "skipped"}:
+                raise ValueError("page_predecessor_unresolved")
+            old = json.loads(prior[0])
+            (validate_progress if kind == "page_completion" else validate_correction)(old.get("plan", old), plan)
+        expected = plan["text"] if kind in {"initial", "page_completion"} else update_text(plan["report_date"], record["effective_notice"], base) if kind == "revision_update" else ""
         pieces = relay.chunks(expected) if expected else []
         parts, images = self.parts(request_id), self.images(request_id)
-        if (kind not in {"initial", "revision_update", "web_only"} or record["text"] != expected
+        if (kind not in {"initial", "revision_update", "web_only", "page_completion"} or record["text"] != expected
                 or len(parts) != len(pieces) or any(p[0] != i or p[1] != hashlib.sha256(pieces[i].encode()).hexdigest() for i, p in enumerate(parts))
                 or len(images) != int(kind == "initial")
                 or images and (images[0][0] != "scheduled-poster" or images[0][1] != plan["poster_sha256"] or images[0][3:] != (len(poster), len(parts)))

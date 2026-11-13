@@ -1,6 +1,8 @@
 """只读验证真实晨报的私有证据包，不联网、不发布、不修改投递状态。"""
 
 from datetime import date
+import base64
+import binascii
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +19,16 @@ LAYERED_TIME_TOLERANCE = 1e-6
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
 SELECTED = {"selected", "update"}
+PAGE_CHECKS = {
+    "model-serving-gpu": ("model_serving",),
+    "hardware-status": ("hardware",),
+    "model-architecture-status": ("model_architecture", "glm_blog", "qwen_blog", "glm_models",
+                                  "deepseek_models", "qwen_models", "deepseek_articles"),
+    "embodied-training": ("embodied_training",),
+    "small-model-status": ("small_models",),
+    "inference-engines": ("inference_engines", "vllm", "sglang", "deepinfer",
+                          "vllm_blog", "sglang_blog", "lmsys_blog", "deepinfer_articles"),
+}
 COVERAGE_LABELS = {
     "vllm": "vLLM 代码", "sglang": "SGLang 代码", "deepinfer": "DeepInfer 代码",
     "vllm_blog": "vLLM 博客", "sglang_blog": "SGLang 博客",
@@ -100,12 +112,156 @@ def _validate_audit(directory):
         read_cache[relative] = data
         return data
 
-    metadata = _json(read("audit.json"), "audit")
+    metadata_bytes = read("audit.json")
+    metadata = _json(metadata_bytes, "audit")
     try:
         validate("research-audit", metadata)
     except BriefError as exc:
         # 不把完整候选、摘录或私人路径回显到运行日志。
         raise BriefError("Invalid research-audit metadata schema") from exc
+    page_scope = metadata.get("page_scope")
+    ready_pages, pending_checks = [], set()
+    previous_metadata = previous_report = previous_summary = None
+    old_pages, current_revision = [], 1
+    if page_scope is not None:
+        _require(metadata.get("coverage_policy") == "publish_verified_with_gaps", "Page scope requires explicit partial coverage policy")
+        delivery = page_scope["page_delivery"]
+        added_pages = delivery["added"]
+        previous = delivery["previous"]
+        evidence = page_scope["previous_evidence"]
+        _require((previous is None) == (evidence is None), "Previous page evidence is required exactly for successors")
+        if previous is not None:
+            _require(previous == {key: evidence[key] for key in ("request_id", "bundle_sha256")},
+                     "Previous delivery and evidence binding differ")
+            previous_summary_bytes = read("previous/audit.json")
+            _require(hashlib.sha256(previous_summary_bytes).hexdigest() == evidence["audit_sha256"],
+                     "Previous audit fingerprint mismatch")
+            previous_summary = _json(previous_summary_bytes, "previous audit")
+            _require(isinstance(previous_summary, dict) and previous_summary.get("audit_valid") is True and previous_summary.get("readiness") in {"ready", "partial", "zero_items"}
+                     and previous_summary.get("blockers") == [] and previous_summary.get("date") == metadata["date"]
+                     and previous_summary.get("schema_version") == "1.4" and isinstance(previous_summary.get("inputs"), dict),
+                     "Previous audit was not an accepted page audit")
+            previous_metadata_bytes = read("previous/metadata.json")
+            _require(hashlib.sha256(previous_metadata_bytes).hexdigest() == previous_summary.get("evidence_metadata_sha256"),
+                     "Previous metadata fingerprint missing or mismatched")
+            previous_metadata = _json(previous_metadata_bytes, "previous metadata")
+            try:
+                validate("research-audit", previous_metadata)
+            except BriefError as exc:
+                raise BriefError("Invalid previous research-audit metadata schema") from exc
+            _require(previous_metadata.get("page_scope") == previous_summary.get("page_scope")
+                     and previous_metadata.get("page_scope", {}).get("contract") == "verified_pages_v1",
+                     "Previous page audit scope mismatch")
+            previous_report_bytes = read("previous/report.json")
+            _require(hashlib.sha256(previous_report_bytes).hexdigest() == previous_summary.get("inputs", {}).get("draft_sha256")
+                     == previous_metadata["inputs"]["draft_sha256"], "Previous report fingerprint mismatch")
+            previous_report = _json(previous_report_bytes, "previous report")
+            _require(isinstance(previous_report, dict) and previous_report.get("schema_version") == "1.2" and previous_report.get("date") == metadata["date"]
+                     and type(previous_report.get("revision")) is int and previous_report["revision"] >= 1,
+                     "Previous report identity mismatch")
+            _require(previous_report.get("page_delivery") == previous_metadata["page_scope"]["page_delivery"],
+                     "Previous report delivery differs from its audit")
+            if "research_previous" in evidence:
+                research = evidence["research_previous"]
+                _require(all(research[key] == evidence[key] for key in ("audit_sha256", "archive_sha256")), "Correction research evidence differs")
+                _require(research["request_id"] == "morning-" + metadata["date"].replace("-", "") + "-r" + str(previous_report["revision"]), "Correction research revision differs")
+                chain = _json(read("previous/corrections.json", MAX_PACKAGE_BYTES), "correction chain")
+                _require(isinstance(chain, list) and 0 < len(chain) < 100, "Bounded correction chain required")
+                cursor = research
+                try:
+                    for item in chain:
+                        _require(isinstance(item, dict) and set(item) == {"bundle_base64", "report_commit"}, "Correction chain fields")
+                        _require(isinstance(item["bundle_base64"], str) and isinstance(item["report_commit"], str) and len(item["report_commit"]) == 40 and all(c in "0123456789abcdef" for c in item["report_commit"]), "Invalid correction chain values")
+                        raw = base64.b64decode(item["bundle_base64"], validate=True)
+                        _require(base64.b64encode(raw).decode() == item["bundle_base64"], "Canonical correction bundle")
+                        bundle = _json(raw, "correction bundle")
+                        _require(isinstance(bundle, dict) and isinstance(bundle.get("files"), list) and all(isinstance(f, dict) and isinstance(f.get("path"), str) for f in bundle["files"]), "Invalid correction bundle structure")
+                        files = [f for f in bundle["files"] if f["path"].endswith("/report.json")]
+                        _require(len(files) == 1, "Correction report missing")
+                        report_bytes = base64.b64decode(files[0]["base64"], validate=True)
+                        _require(hashlib.sha256(report_bytes).hexdigest() == files[0]["sha256"], "Correction report hash")
+                        corrected = _json(report_bytes, "correction report")
+                        rid = "morning-" + metadata["date"].replace("-", "") + "-r" + str(previous_report["revision"]+1)
+                        _require(bundle["request_id"] == rid and isinstance(bundle.get("expected_base_sha"), str) and len(bundle["expected_base_sha"]) == 40 and all(c in "0123456789abcdef" for c in bundle["expected_base_sha"])
+                                 and corrected["date"] == metadata["date"] and corrected["revision"] == previous_report["revision"]+1
+                                 and corrected.get("schema_version") == "1.2"
+                                 and corrected.get("revision_notice", {}).get("kind") in {"correction", "maintenance", "material_update"}, "Correction identity differs")
+                        pages = corrected["page_delivery"]
+                        _require(pages["previous"] == {key: cursor[key] for key in ("request_id", "bundle_sha256")}
+                                 and pages["added"] == [] and pages["pending"] == previous_report["page_delivery"]["pending"]
+                                 and [a["id"] for a in corrected["articles"]] == [a["id"] for a in previous_report["articles"]], "Correction cannot change page partition")
+                        cursor = dict(request_id=rid,bundle_sha256=hashlib.sha256(raw).hexdigest(),report_commit=item["report_commit"])
+                        previous_report = corrected
+                except (BriefError, KeyError, TypeError, ValueError, AttributeError, binascii.Error) as exc:
+                    raise BriefError("Invalid correction chain evidence") from exc
+                _require(cursor == {key:evidence[key] for key in cursor}, "Correction latest publication fingerprint differs")
+            current_revision = previous_report["revision"] + 1
+            _require(previous["request_id"] == "morning-" + metadata["date"].replace("-", "") + "-r" + str(current_revision - 1),
+                     "Previous request revision mismatch")
+            old_articles = previous_report.get("articles")
+            _require(isinstance(old_articles, list) and old_articles
+                     and all(isinstance(article, dict) and article.get("id") in PAGE_CHECKS for article in old_articles),
+                     "Invalid previous page articles")
+            old_pages = [article["id"] for article in old_articles]
+            _require(old_pages == [page for page in PAGE_CHECKS if page in old_pages]
+                     and isinstance(previous_report.get("entries"), list)
+                     and all(isinstance(entry, dict) and entry.get("article_id") in old_pages
+                             and isinstance(entry.get("event_key"), str) for entry in previous_report["entries"]),
+                     "Invalid previous page entries or order")
+            old_pending = {item["id"] for item in previous_report["page_delivery"]["pending"]}
+            _require(set(added_pages) <= old_pending and not set(added_pages) & set(old_pages),
+                     "Successor can only add previously pending pages")
+            _require(metadata["limits"] == previous_metadata["limits"] and metadata["started_at"] == previous_metadata["started_at"]
+                     and metadata["budget_policy"] == previous_metadata["budget_policy"], "Successor cannot reset original budget")
+            for key in ("prompt_commit", "prompt_hashes", "history_commit", "history_sha256"):
+                _require(metadata["inputs"][key] == previous_metadata["inputs"][key], "Successor must retain original research inputs")
+            _require(_time(metadata["finished_at"]) >= _time(previous_metadata["finished_at"]),
+                     "Successor cannot precede its previous completed audit")
+            _require(metadata["sources"][:len(previous_metadata["sources"])] == previous_metadata["sources"],
+                     "Successor must preserve all prior source records")
+            for page in old_pages:
+                for name in PAGE_CHECKS[page]:
+                    _require(metadata["checks"][name] == previous_metadata["checks"][name],
+                             "Previously verified page checks must remain unchanged")
+            previous_calls = {call["stage"]: call for call in previous_metadata["model_calls"]}
+            _require(set(previous_calls) == {"research", "editor"}, "Previous model stages missing")
+            for call in metadata["model_calls"]:
+                old = previous_calls[call["stage"]]
+                attempts = call["attempt_records"]
+                count = len(old["attempt_records"])
+                _require(attempts[:count] == old["attempt_records"] and len(attempts) > count
+                         and call["model"] == old["model"], "Successor must preserve model attempts and append a real page round")
+                for attempt in attempts[count:]:
+                    round_binding = attempt.get("page_round", {})
+                    attempted_pages = round_binding.get("page_ids", [])
+                    _require(round_binding.get("revision") == current_revision
+                             and round_binding.get("previous_audit_sha256") == evidence["audit_sha256"]
+                             and bool(attempted_pages) and set(attempted_pages) <= old_pending
+                             and attempted_pages == [page for page in PAGE_CHECKS if page in attempted_pages],
+                             "New model attempts must bind the exact current page round and canonical pending attempt set")
+                successful = [attempt for attempt in attempts[count:] if attempt["status"] in {"ok", "partial"}]
+                _require(not successful or set(added_pages) <= set(successful[-1]["page_round"]["page_ids"]),
+                         "Last successful attempt must cover added pages in the exact current page round")
+        ready_pages = [page for page in PAGE_CHECKS if page in old_pages + added_pages]
+        pending_pages = [item["id"] for item in delivery["pending"]]
+        _require(added_pages == page_scope["checked_pages"]
+                 and added_pages == [page for page in PAGE_CHECKS if page in added_pages]
+                 and ready_pages == [page for page in PAGE_CHECKS if page in ready_pages]
+                 and pending_pages == [page for page in PAGE_CHECKS if page in pending_pages]
+                 and len(set(ready_pages + pending_pages)) == len(ready_pages + pending_pages) == len(PAGE_CHECKS)
+                 and set(ready_pages + pending_pages) == set(PAGE_CHECKS),
+                 "Page scope must partition all six pages in canonical order")
+        for item in delivery["pending"]:
+            reason = item["reason"]
+            _require(reason.strip() == reason and bool(reason)
+                     and not any(ord(c) < 32 or 127 <= ord(c) <= 159 or c in "<>\u2028\u2029\ufeff"
+                                 or 0xd800 <= ord(c) <= 0xdfff for c in reason),
+                     "Pending page reason contains forbidden characters or whitespace")
+            _require(len(reason.encode("utf-8")) <= 300, "Pending page reason exceeds UTF-8 byte limit")
+        pending_checks = {name for page in pending_pages for name in PAGE_CHECKS[page]}
+        _require(all(metadata["checks"][name]["status"] in {"checked", "no_qualifying_items"}
+                     for page in ready_pages for name in PAGE_CHECKS[page]),
+                 "Ready pages require every assigned check to be completed")
     layered_budget = metadata["schema_version"] == "1.4"
     complete_contract = metadata["schema_version"] in {"1.3", "1.4"}
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
@@ -122,7 +278,7 @@ def _validate_audit(directory):
         except ValueError:
             valid_date = False
         _require(valid_date, "Invalid history report date")
-    _require(not any(report["date"] == metadata["date"] for report in history["reports"]),
+    _require(previous_report is not None or not any(report["date"] == metadata["date"] for report in history["reports"]),
              "Same-day corrections are outside the new-daily audit scope")
     history_entries = {}
     for entry in history["entries"]:
@@ -178,7 +334,7 @@ def _validate_audit(directory):
             _require(len(attempts) == record["attempts"], "Attempt count does not match retained records")
             _require(attempts[-1]["status"] == record["status"], "Final attempt status mismatch")
             known = 0
-            charged_attempts = 0
+            charged_attempts = {}
             cap = limits["source_attempt_seconds" if kind == "source" else "model_stage_seconds"]
             for number, attempt in enumerate(attempts):
                 duration = attempt["elapsed_seconds"]
@@ -191,17 +347,20 @@ def _validate_audit(directory):
                 else:
                     known += duration
                     _require(duration <= run_elapsed + LAYERED_TIME_TOLERANCE, "Attempt duration exceeds recorded run interval")
+                round_id = attempt.get("page_round", {}).get("revision", 1)
+                if "page_round" in attempt:
+                    _require(kind == "model" and previous_metadata is not None, "Page rounds require authenticated previous audit evidence")
                 successful = attempt["status"] in {"ok", "partial"}
                 if attempt["status"] == "unknown" or duration is None:
                     accounting["unknown_attempts"][kind] += 1
                     accounting["reserved_unknown_seconds"] += max(attempt["reserved_seconds"], duration or 0)
-                    charged_attempts += 1
+                    charged_attempts[round_id] = charged_attempts.get(round_id, 0) + 1
                     if attempt["status"] == "unknown":
                         blockers.append("operation_outcome_unknown")
                 elif successful:
                     accounting["successful_attempts"][kind] += 1
                     accounting["successful_seconds"] += duration
-                    charged_attempts += 1
+                    charged_attempts[round_id] = charged_attempts.get(round_id, 0) + 1
                     if duration > cap + LAYERED_TIME_TOLERANCE:
                         blockers.append(f"{kind}_budget_exceeded")
                 else:
@@ -209,7 +368,13 @@ def _validate_audit(directory):
                     accounting["failed_seconds"] += duration
                 if number:
                     previous = attempts[number - 1]
-                    _require(previous["status"] in {"failed", "timeout"}, "Cannot retry an already completed or unknown attempt")
+                    preceding_round = previous.get("page_round", {}).get("revision", 1)
+                    new_round = kind == "model" and previous_metadata is not None and round_id > preceding_round
+                    _require(previous["status"] in {"failed", "timeout"} or
+                             (new_round and previous["status"] in {"ok", "partial"}),
+                             "Cannot retry an already completed or unknown attempt")
+                    _require(round_id == preceding_round or (new_round and round_id <= current_revision),
+                             "Page rounds must advance within authenticated publication revisions")
                     _require(previous["elapsed_seconds"] is not None, "Unknown attempt cannot be replayed")
                 if kind == "model":
                     _require(not successful or attempt["result_sha256"] is not None, "Successful model attempt requires its saved result")
@@ -230,7 +395,7 @@ def _validate_audit(directory):
                 _require(elapsed + LAYERED_TIME_TOLERANCE >= known, "Cumulative duration is less than retained attempts")
                 if kind == "model":
                     _require(abs(elapsed - known) <= LAYERED_TIME_TOLERANCE, "Model cumulative duration must equal retained attempt durations")
-            if charged_attempts > limits[f"{kind}_attempts"]:
+            if any(count > limits[f"{kind}_attempts"] for count in charged_attempts.values()):
                 blockers.append(f"{kind}_budget_exceeded")
 
     sources, source_text = {}, {}
@@ -280,7 +445,11 @@ def _validate_audit(directory):
             checked.append(name)
         elif complete_contract and check["status"] == "not_checked":
             unchecked.append(name)
-            blockers.append("required_coverage_not_checked")
+            if page_scope is not None and name in pending_checks:
+                coverage_gaps.append(name)
+                warnings.append({"code": "coverage_incomplete", "path": f"checks.{name}"})
+            else:
+                blockers.append("required_coverage_not_checked")
         else:
             if complete_contract:
                 _require(check.get("failure_kind") in FAILURE_KINDS and matching and all(s["attempts"] > 0 for s in matching),
@@ -352,7 +521,19 @@ def _validate_audit(directory):
     _require(set(decisions) == set(by_event), "Every candidate needs a selection or exclusion decision")
 
     selected = {key for key, decision in decisions.items() if decision["disposition"] in SELECTED}
-    if allow_partial and coverage_gaps and not selected:
+    retained_keys = set()
+    if previous_summary is not None:
+        # 旧摘要没有累计事件身份，只认可元数据绑定的已选决定。
+        # 不把无法追溯的历史计数当作证据。
+        prior_keys = previous_summary.get("verified_event_keys")
+        if prior_keys is None:
+            prior_keys = [d["event_key"] for d in previous_metadata["decisions"] if d["disposition"] in SELECTED]
+        _require(isinstance(prior_keys, list) and all(isinstance(k, str) for k in prior_keys)
+                 and len(prior_keys) == len(set(prior_keys)), "Invalid previous verified event identities")
+        retained_keys = set(prior_keys) & {entry["event_key"] for entry in previous_report["entries"]}
+    verified_keys = retained_keys | selected
+    selected_count = len(verified_keys)
+    if allow_partial and coverage_gaps and not selected_count:
         blockers.append("partial_report_requires_verified_items")
     notice = metadata.get("coverage_notice")
     if allow_partial and coverage_gaps:
@@ -387,14 +568,38 @@ def _validate_audit(directory):
         draft = _json(draft_bytes, "draft")
         _require(isinstance(draft, dict) and draft.get("date") == metadata["date"] and isinstance(draft.get("entries"), list),
                  "Draft must name this date and contain report entries")
-        _require(type(draft.get("revision")) is int and draft["revision"] == 1,
-                 "Audit supports new daily revision 1 only")
+        _require(type(draft.get("revision")) is int and draft["revision"] == current_revision,
+                 "Audit supports new daily revision 1 only" if previous_report is None
+                 else "Audit revision must follow its exact previous page evidence")
+        if page_scope is not None:
+            _require(draft.get("schema_version") == "1.2" and draft.get("page_delivery") == page_scope["page_delivery"],
+                     "Draft page delivery must match the explicit page scope")
+            articles = draft.get("articles")
+            _require(isinstance(articles, list) and all(isinstance(article, dict) for article in articles)
+                     and [article.get("id") for article in articles] == ready_pages,
+                     "Draft articles must be exactly the newly verified pages")
+            _require(all(isinstance(entry, dict) and entry.get("article_id") in ready_pages for entry in draft["entries"])
+                     and {entry["article_id"] for entry in draft["entries"]} == set(ready_pages),
+                     "Draft entries must belong to newly verified pages")
         if notice is not None:
             _require(draft.get("subtitle") == notice["text"], "Draft subtitle must preserve the complete coverage notice")
-        entries = {}
+        old_entries = []
+        if previous_report is not None:
+            old_articles = [article for article in draft["articles"] if article["id"] in old_pages]
+            _require(old_articles == previous_report["articles"], "Previously published articles must remain unchanged")
+            old_entries = [entry for entry in draft["entries"] if entry["article_id"] in old_pages]
+            _require(old_entries == previous_report["entries"], "Previously published entries must remain unchanged")
+        old_keys = {entry["event_key"] for entry in old_entries}
+        _require(not old_keys & (selected | set(status_entries)), "Current candidates cannot redo old page events")
+        entries, seen_keys = {}, set()
         for entry in draft["entries"]:
             _require(isinstance(entry, dict) and isinstance(entry.get("event_key"), str), "Invalid draft entry")
             key = entry["event_key"]
+            _require(key not in seen_keys, "Draft contains a duplicate event across pages")
+            seen_keys.add(key)
+            if key in old_keys:
+                _require(entry in old_entries, "Only exact retained entries may bypass new evidence checks")
+                continue
             _require(key in selected | status_entries.keys() and key not in entries, "Draft contains an excluded, unknown or duplicate event")
             entries[key] = entry
             urls = entry.get("source_urls")
@@ -414,8 +619,8 @@ def _validate_audit(directory):
         if accounting["charged_seconds"] > limits["run_seconds"] + LAYERED_TIME_TOLERANCE:
             blockers.append("run_budget_exceeded")
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
-            "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected else "zero_items")),
-            "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": len(selected),
+            "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected_count else "zero_items")),
+            "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": selected_count,
             "status_entry_count": len(status_entries), "delivery_allowed": False}
     if metadata["schema_version"] != "1.0":
         # 摘要只含固定字段路径，不回显私有解释、来源地址或正文。
@@ -427,8 +632,12 @@ def _validate_audit(directory):
                       coverage_checked=sorted(checked), coverage_unchecked=sorted(unchecked), limits=dict(limits),
                       inputs={key: metadata["inputs"][key] for key in
                               ("prompt_commit", "history_commit", "prompt_hashes", "history_sha256", "draft_sha256")})
+    if page_scope is not None:
+        result["page_scope"] = page_scope
+        result["verified_event_keys"] = sorted(verified_keys)
     if layered_budget:
-        result.update(budget_accounting=accounting, run_elapsed_seconds=run_elapsed,
+        result.update(evidence_metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
+                      budget_accounting=accounting, run_elapsed_seconds=run_elapsed,
                       budget_policy=metadata["budget_policy"])
         result["budget_unknown"] = result["budget_unknown"] or any(accounting["unknown_attempts"].values())
     return result

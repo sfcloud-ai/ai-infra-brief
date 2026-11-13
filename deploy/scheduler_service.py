@@ -123,7 +123,7 @@ class SchedulerDeployment:
             'assert "scheduler_config" in inspect.signature(runtime.serve).parameters; '
             'assert runtime.SCHEDULER_DRAIN_VERSION==1; '
             + ('assert getattr(runtime,"SCHEDULED_ONLY_VERSION",0)==1; ' if require_scheduled_only else '')
-            + ('assert getattr(runtime,"REVISION_NOTICES_VERSION",0)==1, "revision_ledger_requires_compatible_release"; ' if require_revision_notices else '')
+            + (f'assert getattr(runtime,"REVISION_NOTICES_VERSION",0)>={int(require_revision_notices)}, "revision_ledger_requires_compatible_release"; ' if require_revision_notices else '')
             +
             'assert "can_admit" in inspect.signature(scheduled_runtime.ScheduledRuntime.open).parameters; '
             'c=scheduled_runtime.load_config(Path(sys.argv[2])); '
