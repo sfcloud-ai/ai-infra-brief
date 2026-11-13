@@ -15,6 +15,23 @@ PROMPTS = RESOURCE_ROOT / "prompts"
 
 
 class PromptRuleTests(unittest.TestCase):
+    def test_deferred_pages_have_fixed_topics_and_hourly_resume(self):
+        ids = ("model-serving-gpu", "hardware-status", "model-architecture-status",
+               "embodied-training", "small-model-status", "inference-engines")
+        for name in ("research", "editor", "sources", "audit", "delivery"):
+            text = (PROMPTS / f"{name}.md").read_text(encoding="utf-8")
+            for article_id in ids:
+                self.assertIn(article_id, text)
+            for rule in ("下一小时的 :20", "不是下一自然日", "不生成占位 URL",
+                         "原 report_date", "已发送页面不重做、不重发", "必须续读正文",
+                         "未知上传/发送先按原操作对账"):
+                self.assertIn(rule, text)
+        delivery = (PROMPTS / "delivery.md").read_text(encoding="utf-8")
+        self.assertIn("晨报说明：", delivery)
+        self.assertIn("AI Infra 晨报 · YYYY-MM-DD · 补充", delivery)
+        self.assertIn("相同页及内容哈希已送达则跳过", delivery)
+        self.assertIn("不是可直接绕过现役校验的命令", delivery)
+
     def test_research_explicitly_requires_the_source_catalog(self):
         research = (PROMPTS / "research.md").read_text(encoding="utf-8")
         self.assertIn("必须读取", research)
@@ -78,8 +95,7 @@ class PromptRuleTests(unittest.TestCase):
         notice = re.search(r"```text\n(.*?)\n```", delivery, re.DOTALL).group(1)
         links = re.findall(r"^https://[^\s]+$", notice, re.MULTILINE)
         self.assertEqual(links, [
-            "https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/first-article/",
-            "https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/second-article/",
+            "https://sfcloud-ai.github.io/ai-infra-reports/YYYY-MM-DD/model-serving-gpu/",
         ])
         self.assertNotIn("新 `rN` 是独立版次", delivery)
         for term in ("noindex", "canonical", "不保留旧正文", "已移除文章跳到该日期总页",

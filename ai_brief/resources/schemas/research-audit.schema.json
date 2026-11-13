@@ -509,6 +509,41 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "maximum": 3600
+                },
+                "page_round": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "revision",
+                    "page_ids",
+                    "previous_audit_sha256"
+                  ],
+                  "properties": {
+                    "revision": {
+                      "type": "integer",
+                      "minimum": 2
+                    },
+                    "page_ids": {
+                      "type": "array",
+                      "minItems": 1,
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "model-serving-gpu",
+                          "hardware-status",
+                          "model-architecture-status",
+                          "embodied-training",
+                          "small-model-status",
+                          "inference-engines"
+                        ]
+                      }
+                    },
+                    "previous_audit_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
                 }
               },
               "required": [
@@ -716,6 +751,191 @@
     },
     "budget_policy": {
       "const": "successful_work_hourly_continuation_v1"
+    },
+    "page_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "page_delivery",
+        "checked_pages",
+        "previous_evidence"
+      ],
+      "properties": {
+        "contract": {
+          "const": "verified_pages_v1"
+        },
+        "page_delivery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "previous",
+            "added",
+            "pending"
+          ],
+          "properties": {
+            "previous": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "request_id",
+                    "bundle_sha256"
+                  ],
+                  "properties": {
+                    "request_id": {
+                      "type": "string",
+                      "pattern": "^morning-[0-9]{8}-r[1-9][0-9]*$"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  }
+                }
+              ]
+            },
+            "added": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "model-serving-gpu",
+                  "hardware-status",
+                  "model-architecture-status",
+                  "embodied-training",
+                  "small-model-status",
+                  "inference-engines"
+                ]
+              }
+            },
+            "pending": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "reason"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "model-serving-gpu",
+                      "hardware-status",
+                      "model-architecture-status",
+                      "embodied-training",
+                      "small-model-status",
+                      "inference-engines"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  }
+                }
+              }
+            }
+          }
+        },
+        "checked_pages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "model-serving-gpu",
+              "hardware-status",
+              "model-architecture-status",
+              "embodied-training",
+              "small-model-status",
+              "inference-engines"
+            ]
+          }
+        },
+        "previous_evidence": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request_id",
+                "bundle_sha256",
+                "audit_sha256",
+                "archive_sha256",
+                "report_commit"
+              ],
+              "properties": {
+                "request_id": {
+                  "type": "string",
+                  "pattern": "^morning-[0-9]{8}-r[1-9][0-9]*$"
+                },
+                "bundle_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "audit_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "archive_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "report_commit": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{40}$"
+                },
+                "research_previous": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "request_id",
+                    "bundle_sha256",
+                    "audit_sha256",
+                    "archive_sha256",
+                    "report_commit"
+                  ],
+                  "properties": {
+                    "request_id": {
+                      "type": "string",
+                      "pattern": "^morning-[0-9]{8}-r[1-9][0-9]*$"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "audit_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "archive_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "report_commit": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{40}$"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
     }
   },
   "required": [
@@ -1141,6 +1361,20 @@
           "required": [
             "budget_policy"
           ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "page_scope"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "1.4"
+          }
         }
       }
     }

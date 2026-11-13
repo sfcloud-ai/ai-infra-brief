@@ -18,7 +18,7 @@ import time
 from types import SimpleNamespace
 
 SCHEDULER_DRAIN_VERSION = 1
-REVISION_NOTICES_VERSION = 1
+REVISION_NOTICES_VERSION = 2
 SCHEDULED_ONLY_VERSION = 1
 
 if __package__:

@@ -188,6 +188,31 @@ class SchedulerConfigurationTests(unittest.TestCase):
         for item in directory.iterdir():
             self.assertEqual(item.stat().st_uid, os.getuid())
 
+    def test_page_ledger_requires_version_two_for_candidate_and_rollback(self):
+        directory=self.root/'relay/state';directory.mkdir(parents=True)
+        path=directory/'state.sqlite3'
+        with sqlite3.connect(path) as db:
+            db.execute('CREATE TABLE scheduled_notices(record TEXT)')
+            db.execute('INSERT INTO scheduled_notices VALUES (?)',(json.dumps({'page_state':{'pending':[]}}),))
+        driver=DockerDriver.__new__(DockerDriver)
+        driver.config={'uid':os.getuid(),'gid':os.getgid()}
+        driver.live={'relay_root':str(directory.parent),'container':'managed','legacy_container':'legacy'}
+        self.assertEqual(driver.revision_records_present(),2)
+        driver.scheduler=Mock();driver.scheduler.preflight.side_effect=ServiceError('page_release_incompatible')
+        driver.running_release=Mock(return_value=None);driver.inspect=Mock(return_value=None);driver.command=Mock()
+        with self.assertRaisesRegex(ServiceError,'page_release_incompatible'):driver.start_paused('b'*40)
+        driver.scheduler.preflight.assert_called_once_with(driver,'b'*40,require_revision_notices=2)
+        driver.command.assert_not_called()
+        scheduler=self.load()
+        candidate=Mock(config={'uid':1000,'gid':1000,'image':'synthetic','root':'/releases'})
+        candidate.code.return_value='/code'
+        scheduler.preflight(candidate,'c'*40,require_revision_notices=2)
+        args=candidate.command.call_args_list[0].args[0];check=args[args.index('-c')+1]
+        runtime=SimpleNamespace(serve=lambda scheduler_config:None,SCHEDULER_DRAIN_VERSION=1,REVISION_NOTICES_VERSION=1)
+        modules={name:SimpleNamespace() for name in ('scheduled_runtime','scheduled_delivery','scheduled_socket')}
+        with patch.dict('sys.modules',{'runtime':runtime,**modules}),patch('sys.argv',['check','/code']):
+            with self.assertRaisesRegex(AssertionError,'revision_ledger_requires_compatible_release'):exec(check,{})
+
     def container(self, scheduler):
         mounts = [{'Destination': str(p), 'Source': str(p), 'RW': p == self.ipc}
                   for p in [self.config, self.node, self.tree, self.ipc]]

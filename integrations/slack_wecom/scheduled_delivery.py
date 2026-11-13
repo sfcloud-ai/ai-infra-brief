@@ -53,9 +53,15 @@ def scheduled_notice_day(url, profile):
     return relay.notice_url_day(url, profile)
 
 
+if __package__:
+    from .page_delivery import validate_state, notice_text as page_notice_text
+else:
+    from page_delivery import validate_state, notice_text as page_notice_text
+
+
 def validate_plan(plan, bundle, commit):
     fields = {"report_request_id", "report_date", "report_commit", "bundle_sha256", "notice_key", "text", "poster", "poster_sha256", "mime"}
-    if not isinstance(plan, dict) or set(plan) not in (fields, fields | {"revision_notice"}):
+    if not isinstance(plan, dict) or set(plan) not in (fields, fields | {"revision_notice"}, fields | {"page_state"}, fields | {"page_state", "revision_notice"}):
         raise ScheduledDeliveryError("Exact verified plan required")
     if "revision_notice" in plan:
         validate_notice(plan["revision_notice"])
@@ -64,6 +70,19 @@ def validate_plan(plan, bundle, commit):
             or plan["report_commit"] != commit
             or plan["bundle_sha256"] != hashlib.sha256(bundle).hexdigest()):
         raise ScheduledDeliveryError("Source binding differs")
+    if "page_state" in plan:
+        revision = plan.get("revision_notice", {}).get("revision", 1)
+        validate_state(plan["page_state"], plan["report_date"], revision)
+        if plan["report_request_id"] != f"morning-{plan['report_date'].replace('-', '')}-r{revision}":
+            raise ScheduledDeliveryError("Canonical page request required")
+        if revision > 1 and ((plan["revision_notice"]["kind"] == "page_completion") != bool(plan["page_state"]["added"])):
+            raise ScheduledDeliveryError("Page completion policy required")
+        base = plan["notice_key"][:-len(plan["report_date"])-1]
+        articles = [{**a, "url": base + plan["report_date"] + "/" + a["id"] + "/"} for a in plan["page_state"]["articles"]]
+        if plan["text"] != page_notice_text(plan["report_date"], articles, plan["page_state"]):
+            raise ScheduledDeliveryError("Page notification differs")
+    elif plan.get("revision_notice", {}).get("kind") == "page_completion":
+        raise ScheduledDeliveryError("Page state required")
     day = dt.date.fromisoformat(plan["report_date"])
     if day.isoformat() != plan["report_date"]:
         raise ScheduledDeliveryError("Canonical report date required")
@@ -158,6 +177,8 @@ class ScheduledDelivery:
             return self.revisions.status(request_id) or {"status": "not_found"}
         record=json.loads(row[4])
         result = {**self.store.status(request_id), "phase": row[0], "next_attempt_at": row[1], "attempts": row[2], "last_error": row[3], **{k:record[k] for k in ("report_date","report_commit","bundle_sha256")}}
+        if "page_state" in record:
+            result["page_state"] = record["page_state"]
         if row[0] == "superseded":
             self.revisions.check_supersession(request_id, row[4])
             result["superseded_by"] = self.db.execute("SELECT successor FROM scheduled_supersessions WHERE predecessor=?", (request_id,)).fetchone()[0]

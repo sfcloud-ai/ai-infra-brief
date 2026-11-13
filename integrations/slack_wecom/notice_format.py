@@ -1,4 +1,9 @@
 """有界的分项通知数据格式与固定来源发布清单读取。"""
+if __package__:
+    from .page_delivery import validate_pages, notice_text as page_notice_text
+else:
+    from page_delivery import validate_pages, notice_text as page_notice_text
+
 from datetime import date
 from contextlib import contextmanager
 import base64
@@ -51,7 +56,7 @@ def base_url(base):
     return base
 
 
-def article_text(day, revision, articles, base, *, stable=False):
+def article_text(day, revision, articles, base, *, stable=False, enforce_limit=True):
     day_string(day)
     base_url(base)
     require(type(revision) is int and 0 < revision <= 9007199254740991 and isinstance(articles, list) and 0 < len(articles) <= 30)
@@ -68,7 +73,7 @@ def article_text(day, revision, articles, base, *, stable=False):
         seen.add(identity)
         lines.extend(["", title, root + identity + "/"])
     text = "\n".join(lines)
-    require(len(text.encode("utf-8")) <= MAX_NOTICE_BYTES)
+    require(not enforce_limit or len(text.encode("utf-8")) <= MAX_NOTICE_BYTES)
     return text
 
 
@@ -76,10 +81,14 @@ def build_manifest(report, base, report_hash, commit, *, stable=False):
     require(isinstance(report, dict) and isinstance(commit, str) and SHA.fullmatch(commit)
             and isinstance(report_hash, str) and HASH.fullmatch(report_hash))
     day, revision = report.get("date"), report.get("revision")
-    text = article_text(day, revision, report.get("articles"), base, stable=stable)
+    text = article_text(day, revision, report.get("articles"), base, stable=stable, enforce_limit=report.get("schema_version") != "1.2")
     require(type(stable) is bool)
     root = f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"
     articles = [{"id": a["id"], "title": a["title"], "url": root + a["id"] + "/"} for a in report["articles"]]
+    if report.get("schema_version") == "1.2":
+        require(stable)
+        validate_pages(report.get("page_delivery"), report["articles"], day, revision)
+        text = page_notice_text(day, articles, report["page_delivery"])
     poster = report.get("poster")
     require(isinstance(poster, str) and re.fullmatch(r"assets/[a-z0-9][a-z0-9-]{0,79}\.(png|jpg)", poster))
     images = report.get("images")
@@ -90,17 +99,24 @@ def build_manifest(report, base, report_hash, commit, *, stable=False):
                 "index_url": root, "articles": articles, "text": text,
                 "poster": {"url": (f"{base}reports/{day}/" if stable else f"{base}reports/{day}/r{revision}/") + poster, "sha256": matches[0]["sha256"]},
                 "report_sha256": report_hash}
+    if report.get("schema_version") == "1.2":
+        manifest.update(schema_version="1.1", page_delivery=report["page_delivery"])
     validate_manifest(manifest, base)
     return manifest
 
 
 def validate_manifest(manifest, base):
-    exact(manifest, ["schema_version", "commit", "date", "revision", "index_url", "articles", "text", "poster", "report_sha256"])
-    require(manifest["schema_version"] == "1.0" and isinstance(manifest["commit"], str) and SHA.fullmatch(manifest["commit"])
+    require(isinstance(manifest, dict))
+    exact(manifest, ["schema_version", "commit", "date", "revision", "index_url", "articles", "text", "poster", "report_sha256"] + (["page_delivery"] if manifest.get("schema_version") == "1.1" else []))
+    require(manifest["schema_version"] in {"1.0", "1.1"} and isinstance(manifest["commit"], str) and SHA.fullmatch(manifest["commit"])
             and isinstance(manifest["report_sha256"], str) and HASH.fullmatch(manifest["report_sha256"]))
     stable = manifest["index_url"] == f"{base}{manifest['date']}/"
-    expected = article_text(manifest["date"], manifest["revision"], manifest["articles"], base, stable=stable)
+    expected = article_text(manifest["date"], manifest["revision"], manifest["articles"], base, stable=stable, enforce_limit=manifest["schema_version"] != "1.1")
     root = f"{base}{manifest['date']}/" if stable else f"{base}{manifest['date']}/r{manifest['revision']}/"
+    if manifest["schema_version"] == "1.1":
+        require(stable)
+        validate_pages(manifest["page_delivery"], manifest["articles"], manifest["date"], manifest["revision"])
+        expected = page_notice_text(manifest["date"], manifest["articles"], manifest["page_delivery"])
     require(manifest["index_url"] == root and manifest["text"] == expected)
     for article in manifest["articles"]:
         exact(article, ["id", "title", "url"])
@@ -194,17 +210,21 @@ def bundle_poster(data, manifest, base):
     require(metadata is not None and len(metadata) < 128 * 1024
             and hashlib.sha256(metadata).hexdigest() == manifest["report_sha256"])
     report = json.loads(metadata.decode("utf-8"), object_pairs_hook=_unique_object)
-    revised = report.get("schema_version") == "1.1"
-    exact(report, ["schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"] + (["revision_notice"] if revised else []))
+    paged = report.get("schema_version") == "1.2"
+    revised = report.get("schema_version") == "1.1" or paged and report.get("revision", 0) > 1
+    exact(report, ["schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"] + (["revision_notice"] if revised else []) + (["page_delivery"] if paged else []))
     if revised:
         if __package__:
             from .revision_notice import validate_notice
         else:
             from revision_notice import validate_notice
         exact(report["revision_notice"], ["kind", "summary"])
+        require(report["revision_notice"]["kind"] != "page_completion" or paged)
+        if paged:
+            require((report["revision_notice"]["kind"] == "page_completion") == bool(report["page_delivery"]["added"]))
         require(type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"])
         validate_notice({"revision": manifest["revision"], **report["revision_notice"]})
-    require(report["schema_version"] in {"1.0", "1.1"} and report["date"] == manifest["date"]
+    require(report["schema_version"] in {"1.0", "1.1", "1.2"} and report["date"] == manifest["date"]
             and type(report["revision"]) in (int, float) and report["revision"] == manifest["revision"]
             and isinstance(report["images"], list) and len(report["images"]) <= 20
             and build_manifest({**report, "revision": manifest["revision"]}, base,
