@@ -84,3 +84,19 @@ v1.0、v1.1 保持原覆盖门槛。只有任务明确采用“发布已核实�
 - 退出码 `2`：文件、schema、哈希、时间、引用或成稿绑定无效，不能继续发布。
 
 所有结果均为 `delivery_allowed=false`。退出码 0 只允许在已有授权范围内继续内容审查，不是事实真实性、完整网站核查、已公开、已合入或已送达的证明，也不新增任何外发权限。环境不能运行验证器时保留包并报告该缺口，不宣称审计已通过，不用人工改为成功。
+
+## v1.4 分层预算与按小时接续
+
+metadata 和 summary 必须显式绑定 `budget_policy=successful_work_hourly_continuation_v1`。
+
+仅在对应 T4 `research_plan_v4`（或旧计划已追加宿主批准的 recovery grant）、恢复策略和验证器已部署时启用；`1.0`–`1.3` 和原计划不可事后改写。v1.4 继续 `daily_required_v1`、全部十九项 checks、事实/草稿/提示词绑定以及 partial 条件。
+
+`limits` 精确包含 `source_attempts`、`model_attempts`（成功次数额度，各最多 2）、`source_attempt_seconds`（单次网络读取上限，最多 180 秒）、`model_stage_seconds`（成功阶段操作上限，最多 3600 秒）、`run_seconds`（累计成功操作耗时额度，最多 3600 秒），值必须与 T4 原计划或已批准 grant 所提供的有效预算逐项一致。旧计划恢复在独立归档记录采用时间、grant SHA、新验证器 SHA 与原输入 SHA，不修改原计划、原失败或原提示词。真实失败和 timeout 保留实际耗时及次数，但不扣成功额度；不能把未知结果标为失败释放额度。未知结果或未知耗时保守保留该操作原 reserved_seconds 与实际已知耗时两者中的较大额度，不补零。网络有限重试与阶段接续由 T4 原授权策略控制，按下一可执行小时 :20 恢复未完成任务，不绕过授权或无限热循环。
+
+每条 source 和 model_calls 均须 `attempt_records`，长度等于 attempts；attempts 始终为历史实际尝试总数而非成功计费次数。顺序保留所有实际尝试。共同字段为 `status`、`elapsed_seconds`、`error`、`reserved_seconds`（原 T4 操作真实预留，必须大于零且不超过对应类型上限；恢复旧记录逐项读回，不猜测）；null 时间必须另有 `timing_unavailable_reason`。来源 status 为 ok/failed/timeout/unknown；模型还可 partial。成功 error 为空，其他状态保留具体原因。最后一项状态与累计记录一致。只能在原明确失败/超时已经核验后继续，未知结果或计时不能直接重放。权限拒绝与外部写入结果未知不按普通网络波动重试。
+
+source 累计 elapsed_seconds 包含请求、等待和退避，不与单次网络上限混用。model 累计 elapsed_seconds 保留所有实际尝试耗时，不因以前失败累计超过成功操作上限而阻断。成功操作本身超过相应上限仍阻断；网络超时作为失败事实保留，允许其他证据合规的非零项部分晨报。started_at、finished_at 与整轮墙钟时间保持真实，跨小时等待不消耗成功研究额度。summary 的 budget_accounting 分别列出 successful_attempts/seconds、failed_attempts/seconds、unknown_attempts、reserved_unknown_seconds 和 charged_seconds；run_elapsed_seconds 是实际跨小时墙钟，不冒称模型推理耗时。
+
+模型每次尝试另有 `input_sha256`、`checkpoint_sha256`、`result_sha256`；后两者无产物时为 null。非 null 哈希对应私有包 `stage_artifacts/<sha256>.json` 的实际原字节，并随原研究 archive 持久保存、读回。恢复保留前次输入原件与哈希；补齐正文或证据可生成新 input artifact，明确记录新增证据与输入变化，不覆盖原输入。后一次 checkpoint_sha256 必须等于前次已保存 result_sha256，前次耗时必须已知；T4 原操作已 acknowledged、原检查点 stored 且成功额度与接续窗口许可成立后才能 reserve。不得用任意文件替代前次结果，也不得重放未知结果。此验证器只审核原记录，不自行发起重试或授予新窗口。
+
+恢复后最终成功且其余检查成立，可通过审计。最终失败、成功额度超限、editor 缺失、未检查覆盖、草稿或事实证据不足仍阻断。模型输入尚待取证时不先启动模型计时；模型返回后立即保存真实结果与结束时间，后续协调/等待/归档单独记录。
