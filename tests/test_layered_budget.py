@@ -50,6 +50,59 @@ class LayeredBudgetTests(unittest.TestCase):
         source['attempt_records'] = [dict(status='failed', elapsed_seconds=1, error=source['error'], reserved_seconds=180)]
         self.assertEqual(self.check()['readiness'], 'partial')
 
+    def test_known_source_then_failed_render_retains_success_and_unknown_reservation(self):
+        baseline = self.check()['budget_accounting']
+        source = self.failed(kind='transport')
+        source.update(attempts=2, elapsed_seconds=None,
+                      timing_unavailable_reason='synthetic browser timing loss')
+        source['attempt_records'] = [
+            dict(status='ok', elapsed_seconds=3.932651239, error='', reserved_seconds=60),
+            dict(status='failed', elapsed_seconds=None, error=source['error'], reserved_seconds=60,
+                 timing_unavailable_reason=source['timing_unavailable_reason'])]
+        result = self.check()
+        self.assertEqual(result['readiness'], 'partial')
+        self.assertEqual(result['coverage_incomplete'], ['qwen_blog'])
+        self.assertTrue(result['budget_unknown'])
+        accounting = result['budget_accounting']
+        self.assertAlmostEqual(accounting['successful_seconds'], baseline['successful_seconds'] - 1 + 3.932651239)
+        self.assertEqual(accounting['successful_attempts'], baseline['successful_attempts'])
+        self.assertEqual(accounting['unknown_attempts']['source'], 1)
+        self.assertEqual(accounting['reserved_unknown_seconds'], 60)
+        self.assertAlmostEqual(accounting['charged_seconds'], accounting['successful_seconds'] + 60)
+        self.assertEqual(source['attempt_records'][0]['status'], 'ok')
+
+    def test_known_source_reread_charges_both_successes_and_enforces_quota(self):
+        baseline = self.check()['budget_accounting']
+        source = self.audit['sources'][0]
+        previous = dict(source['attempt_records'][0])
+        source.update(attempts=2, elapsed_seconds=previous['elapsed_seconds'] * 2,
+                      attempt_records=[previous, dict(previous)])
+        accounting = self.check()['budget_accounting']
+        self.assertEqual(accounting['successful_seconds'], baseline['successful_seconds'] + previous['elapsed_seconds'])
+        self.assertEqual(accounting['successful_attempts']['source'], baseline['successful_attempts']['source'] + 1)
+        self.audit['limits']['source_attempts'] = 1
+        self.assertIn('source_budget_exceeded', self.check()['blockers'])
+        self.audit['limits']['source_attempts'] = 2
+        source['attempt_records'].append(dict(previous))
+        source.update(attempts=3, elapsed_seconds=previous['elapsed_seconds'] * 3)
+        self.assertIn('source_budget_exceeded', self.check()['blockers'])
+
+    def test_source_reread_still_rejects_unknown_previous_outcome_or_timing(self):
+        source = self.audit['sources'][0]
+        previous = dict(source['attempt_records'][0])
+        source.update(attempts=2, elapsed_seconds=previous['elapsed_seconds'] * 2,
+                      attempt_records=[dict(previous, status='unknown', error='unconfirmed'), dict(previous)])
+        self.reject('Cannot retry')
+        source['attempt_records'][0] = dict(previous, elapsed_seconds=None,
+                                            timing_unavailable_reason='synthetic missing timing')
+        source.update(elapsed_seconds=None, timing_unavailable_reason='synthetic missing timing')
+        self.reject('Unknown attempt cannot be replayed')
+
+    def test_source_reread_does_not_allow_completed_model_retry(self):
+        call = self.recover()
+        call['attempt_records'][0].update(status='ok', error='')
+        self.reject('Cannot retry')
+
     def recover(self):
         call = self.audit['model_calls'][0]
         old = dict(call['attempt_records'][0], status='timeout', error='synthetic interruption', elapsed_seconds=200)
