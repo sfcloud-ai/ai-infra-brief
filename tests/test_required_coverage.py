@@ -69,6 +69,21 @@ class RequiredCoverageTests(unittest.TestCase):
         self.assertEqual(result["limits"], self.audit["limits"])
         self.assertEqual(result["inputs"]["draft_sha256"], self.audit["inputs"]["draft_sha256"])
 
+    def test_qwen_research_entry_and_articles_are_valid_audit_sources(self):
+        source = next(s for s in self.audit["sources"] if s["id"] == "coverage-qwen_blog")
+        for url in ("https://qwen.ai/research", "https://qwen.ai/research/",
+                    "https://www.qwen.ai/research/example", "https://qwen.ai/blog",
+                    "https://qwenlm.github.io/blog/example"):
+            source["url"] = url
+            self.assertEqual(self.check()["readiness"], "ready", url)
+        source = self.failed(kind="unusable_response", retained=b"<html>JavaScript shell</html>")
+        source["url"] = "https://qwen.ai/research"
+        self.assertEqual(self.check()["readiness"], "partial")
+        for url in ("https://qwen.ai/research-other", "https://qwen.ai/", "https://qwen.ai/chat",
+                    "https://qwen.ai.example/research", "https://qwenlm.github.io/research"):
+            self.assertFalse(source_matches("qwen_blog", url), url)
+        self.assertFalse(source_matches("glm_blog", "https://qwen.ai/research"))
+
     def test_every_required_direction_and_source_group_must_exist(self):
         for name in REQUIRED_CHECKS:
             value = self.audit["checks"].pop(name)

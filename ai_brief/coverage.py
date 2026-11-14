@@ -71,7 +71,9 @@ def source_matches(check, url):
                    "lmsys_blog": {"lmsys.org", "www.lmsys.org"}, "glm_blog": {"z.ai", "www.z.ai"},
                    "qwen_blog": {"qwen.ai", "www.qwen.ai", "qwenlm.github.io"}}
         return host in domains[check] and (host == "blog.vllm.ai" or path == "/blog" or path.startswith("/blog/")
-                                          or (check == "glm_blog" and path == "/sitemap.xml"))
+                                          or (check == "glm_blog" and path == "/sitemap.xml")
+                                          or (check == "qwen_blog" and host in {"qwen.ai", "www.qwen.ai"}
+                                              and (path == "/research" or path.startswith("/research/"))))
     if check == "deepseek_articles":
         return host in {"deepseek.com", "www.deepseek.com", "api-docs.deepseek.com"} and (path == "/news" or path.startswith("/news/"))
     if check == "deepinfer_articles":
