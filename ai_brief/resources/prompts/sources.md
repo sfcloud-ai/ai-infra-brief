@@ -56,8 +56,8 @@
 | `glm_blog` | [Z.ai 官方技术文章](https://z.ai/blog) · [官方站点目录](https://z.ai/sitemap.xml) | 与模型卡分别核查。入口返回 404、动态空壳或目录不完整时保留实际失败；从官方目录定位并读取具体文章。搜索摘要只作线索，旧文章不能证明当前窗口查全。 |
 | `glm` | [zai-org 官方项目](https://github.com/zai-org) · [官方模型卡](https://huggingface.co/zai-org) | 从组织入口定位具体 GLM 模型、配置、报告与实现；核对架构及引擎适配，不将全组织动态入选。 |
 | `deepseek_models` | [DeepSeek 官方项目](https://github.com/deepseek-ai) · [官方模型卡](https://huggingface.co/deepseek-ai) | 注意力/缓存机制、MoE、草稿验证和新架构；模型声明不等于三引擎均已实现。 |
-| `qwen_blog` | [Qwen 官方博客](https://qwen.ai/blog) · [历史官方博客](https://qwenlm.github.io/blog/) | 独立记录当前窗口的文章覆盖。历史站已提示迁移，新站不可读时模型卡只能补模型事实，不能代替博客覆盖或证明没有文章。 |
-| `qwen` | [Qwen 官方项目](https://github.com/QwenLM) · [官方模型卡](https://huggingface.co/Qwen) · [官方博客](https://qwen.ai/blog) | 新架构、部署与小模型；旧博客已提示迁移至 qwen.ai。新站正文不可读时明确记录，并以可读的官方模型卡/代码补证，不宣称该入口已检索成功。 |
+| `qwen_blog` | [Qwen 官方博客](https://qwen.ai/research) · [历史官方博客](https://qwenlm.github.io/blog/) | 独立记录当前窗口的文章覆盖。2026-11-14 核验旧站官方迁移链接指向 qwen.ai/research；历史站仅用于历史溯源。HTTP 200 的 JavaScript 空壳不等于正文读取成功；须取得具体文章正文及日期，新站不可读时保留实际失败，模型卡只能补模型事实，不能代替博客覆盖或证明没有文章。 |
+| `qwen` | [Qwen 官方项目](https://github.com/QwenLM) · [官方模型卡](https://huggingface.co/Qwen) · [官方博客](https://qwen.ai/research) | 新架构、部署与小模型；旧博客已提示迁移至 qwen.ai。新站正文不可读时明确记录，并以可读的官方模型卡/代码补证，不宣称该入口已检索成功。 |
 | `lmcache` | [LMCache 官方仓库](https://github.com/LMCache/LMCache) | KV 生命周期、卸载、传输及引擎集成；不能据此推断不同模型可任意共享 KV。 |
 | `isaac_gr00t` | [Isaac-GR00T 官方仓库](https://github.com/NVIDIA/Isaac-GR00T) | 具身训练/数据效率与部署资源；区分实验室、仿真、真实机器人及工厂证据。 |
 | `lerobot` | [LeRobot 官方仓库](https://github.com/huggingface/lerobot) | 数据采集、训练/评测闭环和策略适配；只选与制造业操作及资源效率相关的变化。 |

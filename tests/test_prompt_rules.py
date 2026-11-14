@@ -139,6 +139,16 @@ class PromptRuleTests(unittest.TestCase):
         self.assertIn("FlashInfer", sources)
         self.assertIn("不是文章精确发布时间", sources)
 
+    def test_qwen_uses_current_official_research_entry(self):
+        sources = (PROMPTS / "sources.md").read_text(encoding="utf-8")
+        for source_id in ("qwen_blog", "qwen"):
+            row = next(line for line in sources.splitlines() if line.startswith(f"| `{source_id}` |"))
+            self.assertIn("](https://qwen.ai/research)", row)
+            self.assertNotIn("](https://qwen.ai/blog)", row)
+        self.assertIn("历史站仅用于历史溯源", sources)
+        self.assertIn("JavaScript 空壳不等于正文读取成功", sources)
+        self.assertIn("不能代替博客覆盖或证明没有文章", sources)
+
     def test_research_prioritizes_articles_without_losing_repository_coverage(self):
         research = (PROMPTS / "research.md").read_text(encoding="utf-8")
         self.assertIn("vLLM 官方博客", research)
