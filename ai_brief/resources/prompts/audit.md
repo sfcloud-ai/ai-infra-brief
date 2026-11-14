@@ -118,7 +118,7 @@ metadata 和 summary 必须显式绑定 `budget_policy=successful_work_hourly_co
 
 `limits` 精确包含 `source_attempts`、`model_attempts`（成功次数额度，各最多 2）、`source_attempt_seconds`（单次网络读取上限，最多 180 秒）、`model_stage_seconds`（成功阶段操作上限，最多 3600 秒）、`run_seconds`（累计成功操作耗时额度，最多 3600 秒），值必须与 T4 原计划或已批准 grant 所提供的有效预算逐项一致。旧计划恢复在独立归档记录采用时间、grant SHA、新验证器 SHA 与原输入 SHA，不修改原计划、原失败或原提示词。真实失败和 timeout 保留实际耗时及次数，但不扣成功额度；不能把未知结果标为失败释放额度。未知结果或未知耗时保守保留该操作原 reserved_seconds 与实际已知耗时两者中的较大额度，不补零。网络有限重试与阶段接续由 T4 原授权策略控制，按下一可执行小时 :20 恢复未完成任务，不绕过授权或无限热循环。
 
-每条 source 和 model_calls 均须 `attempt_records`，长度等于 attempts；attempts 始终为历史实际尝试总数而非成功计费次数。顺序保留所有实际尝试。共同字段为 `status`、`elapsed_seconds`、`error`、`reserved_seconds`（原 T4 操作真实预留，必须大于零且不超过对应类型上限；恢复旧记录逐项读回，不猜测）；null 时间必须另有 `timing_unavailable_reason`。来源 status 为 ok/failed/timeout/unknown；模型还可 partial。成功 error 为空，其他状态保留具体原因。最后一项状态与累计记录一致。只能在原明确失败/超时已经核验后继续，未知结果或计时不能直接重放。权限拒绝与外部写入结果未知不按普通网络波动重试。
+每条 source 和 model_calls 均须 `attempt_records`，长度等于 attempts；attempts 始终为历史实际尝试总数而非成功计费次数。顺序保留所有实际尝试。共同字段为 `status`、`elapsed_seconds`、`error`、`reserved_seconds`（原 T4 操作真实预留，必须大于零且不超过对应类型上限；恢复旧记录逐项读回，不猜测）；null 时间必须另有 `timing_unavailable_reason`。来源 status 为 ok/failed/timeout/unknown；模型还可 partial。成功 error 为空，其他状态保留具体原因。最后一项状态与累计记录一致。来源在前次结果及耗时均已知、原宿主授权和剩余额度成立时可再次读取，例如 HTTP 成功但仅取得动态空壳后补读渲染页面；同一来源保留全部尝试，原成功照常计费，后次未知耗时照常保留预留。模型同轮接续仍须原明确失败/超时已经核验；未知结果或计时不能直接重放。权限拒绝与外部写入结果未知不按普通网络波动重试。
 
 source 累计 elapsed_seconds 包含请求、等待和退避，不与单次网络上限混用。model 累计 elapsed_seconds 保留所有实际尝试耗时，不因以前失败累计超过成功操作上限而阻断。成功操作本身超过相应上限仍阻断；网络超时作为失败事实保留，允许其他证据合规的非零项部分晨报。started_at、finished_at 与整轮墙钟时间保持真实，跨小时等待不消耗成功研究额度。summary 的 budget_accounting 分别列出 successful_attempts/seconds、failed_attempts/seconds、unknown_attempts、reserved_unknown_seconds 和 charged_seconds；run_elapsed_seconds 是实际跨小时墙钟，不冒称模型推理耗时。
 

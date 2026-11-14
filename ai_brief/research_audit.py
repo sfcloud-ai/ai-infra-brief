@@ -370,7 +370,8 @@ def _validate_audit(directory):
                     previous = attempts[number - 1]
                     preceding_round = previous.get("page_round", {}).get("revision", 1)
                     new_round = kind == "model" and previous_metadata is not None and round_id > preceding_round
-                    _require(previous["status"] in {"failed", "timeout"} or
+                    known_source_read = kind == "source" and previous["status"] == "ok"
+                    _require(known_source_read or previous["status"] in {"failed", "timeout"} or
                              (new_round and previous["status"] in {"ok", "partial"}),
                              "Cannot retry an already completed or unknown attempt")
                     _require(round_id == preceding_round or (new_round and round_id <= current_revision),
