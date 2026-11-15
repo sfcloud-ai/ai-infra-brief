@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -469,7 +470,7 @@ def _validate_audit(directory):
             else:
                 blockers.append("required_coverage_incomplete")
 
-    calls = {}
+    calls, retained_sources, retained_source_text = {}, {}, {}
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
@@ -477,10 +478,129 @@ def _validate_audit(directory):
         if model["name"] is None or model["version"] is None:
             _require(bool(model["unavailable_reason"].strip()), "Unavailable model identity needs an honest explanation")
         operation_budget(call, "model", index)
+        resolution = call.get("coverage_resolution")
+        if resolution is not None:
+            _require(layered_budget and call["stage"] == "research" and call["status"] == "partial"
+                     and allow_partial and not coverage_gaps and not unchecked,
+                     "Coverage resolution requires a retained partial research stage and completed current checks")
+            attempt = call["attempt_records"][-1]
+            _require(attempt["result_sha256"] is not None, "Coverage resolution needs the original research result")
+            original = _json(read(f"stage_artifacts/{attempt['result_sha256']}.json", MAX_PACKAGE_BYTES), "research result")
+            _require(isinstance(original, dict) and original.get("stage") == "research"
+                     and original.get("stage_status") == "partial"
+                     and original.get("partial_reason") == "coverage_incomplete"
+                     and original.get("error") == attempt["error"] == call["error"]
+                     and original.get("input_sha256") == attempt["input_sha256"]
+                     and original.get("elapsed_seconds") == attempt["elapsed_seconds"],
+                     "Coverage resolution must preserve the original partial result and timing")
+            output_sha = original.get("output_sha256")
+            _require(isinstance(output_sha, str) and re.fullmatch(r"[a-f0-9]{64}", output_sha),
+                     "Coverage resolution needs the original research output fingerprint")
+            output_bytes = read(f"stage_artifacts/{output_sha}.json", MAX_PACKAGE_BYTES)
+            _require(hashlib.sha256(output_bytes).hexdigest() == output_sha, "Research output fingerprint mismatch")
+            output = _json(output_bytes, "research output")
+            original_candidates = output.get("candidates") if isinstance(output, dict) else None
+            _require(isinstance(original_candidates, dict) and original_candidates.get("mode") == "live"
+                     and original_candidates.get("items") == candidates["items"],
+                     "Coverage resolution cannot introduce new research candidates")
+            prior_checks = output.get("checks")
+            _require(isinstance(prior_checks, dict) and set(prior_checks) == set(metadata["checks"])
+                     and all(isinstance(check, dict) and isinstance(check.get("status"), str) and check.get("status") in
+                             {"checked", "no_qualifying_items", "failed"} for check in prior_checks.values()),
+                     "Coverage resolution requires the original completed research coverage record")
+            prior_gaps = [name for name, check in prior_checks.items() if check["status"] == "failed"]
+            _require(bool(prior_gaps), "Coverage resolution needs a real original gap")
+            prior_sources = output.get("sources")
+            _require(isinstance(prior_sources, list) and prior_sources,
+                     "Coverage resolution needs original source attempts")
+            try:
+                validate("research-audit", dict(metadata, sources=prior_sources))
+            except BriefError as exc:
+                raise BriefError("Invalid retained research source or coverage schema") from exc
+            prior_by_id = {}
+            for prior in prior_sources:
+                _require(isinstance(prior, dict) and isinstance(prior.get("id"), str),
+                         "Original source identity is invalid")
+                _require(prior["id"] not in prior_by_id, "Original source identity is duplicated")
+                prior_by_id[prior["id"]] = prior
+                current = sources.get(prior["id"])
+                records = prior.get("attempt_records") if isinstance(prior, dict) else None
+                _require(current is not None and current["url"] == prior.get("url")
+                         and isinstance(records, list) and records
+                         and all(isinstance(record, dict) for record in records)
+                         and prior.get("attempts") == len(records)
+                         and prior.get("status") == records[-1].get("status")
+                         and current["attempt_records"][:len(records)] == records,
+                         "Coverage resolution must retain all original source attempts")
+                _require(len(current["attempt_records"]) > len(records) or current == prior,
+                         "Changed retained sources require an appended budgeted attempt")
+                _require(prior["elapsed_seconds"] is None or current["elapsed_seconds"] is None or
+                         current["elapsed_seconds"] + LAYERED_TIME_TOLERANCE >= prior["elapsed_seconds"],
+                         "Coverage resolution must preserve recorded cumulative source time")
+                prior_hash = prior.get("content_sha256")
+                _require(prior.get("status") != "ok" or (prior_hash is not None and not prior["error"]),
+                         "Original successful source needs retained response bytes")
+                if prior_hash is not None:
+                    _require(isinstance(prior_hash, str) and re.fullmatch(r"[a-f0-9]{64}", prior_hash),
+                             "Original source fingerprint is invalid")
+                    relative = f"evidence/{prior['id']}.txt" if current["content_sha256"] == prior_hash else f"evidence/{prior_hash}.txt"
+                    prior_bytes = read(relative, MAX_PACKAGE_BYTES)
+                    _require(hashlib.sha256(prior_bytes).hexdigest() == prior_hash,
+                             "Original source response fingerprint mismatch")
+                    try:
+                        retained_source_text[prior["id"]] = prior_bytes.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise BriefError("Original source response must be UTF-8") from exc
+                    _require(prior["status"] != "ok" or bool(retained_source_text[prior["id"]].strip()),
+                             "Original successful source evidence is empty")
+                retained_sources[prior["id"]] = prior
+            for name, check in prior_checks.items():
+                ids = check.get("source_ids")
+                _require(isinstance(ids, list) and ids and all(isinstance(i, str) and i in prior_by_id for i in ids),
+                         "Original coverage requires retained source references")
+                matching = [prior_by_id[i] for i in ids if source_matches(name, prior_by_id[i]["url"])]
+                if check["status"] != "failed":
+                    _require(any(s["status"] == "ok" for s in matching), "Original completed coverage needs successful evidence")
+                    continue
+                kind = check.get("failure_kind")
+                _require(isinstance(kind, str) and kind in FAILURE_KINDS and matching,
+                         "Original failed coverage needs an explicit failure kind and matching source")
+                if kind in {"transport", "access_denied"}:
+                    statuses = {"failed", "timeout"} if kind == "transport" else {"failed"}
+                    _require(any(s["status"] in statuses for s in matching), "Original access failure needs failed-source evidence")
+                elif kind == "unusable_response":
+                    _require(any(s["status"] == "failed" and s.get("content_sha256") is not None for s in matching),
+                             "Original unusable response needs retained failed-source bytes")
+                else:
+                    _require(any(s.get("content_sha256") is not None for s in matching),
+                             "Original incomplete listing needs retained source bytes")
+            resolved = references(resolution["source_ids"])
+            _require(all(source["id"] not in prior_by_id or len(source["attempt_records"]) >
+                         len(prior_by_id[source["id"]]["attempt_records"]) for source in resolved),
+                     "Reused resolution sources require an appended budgeted attempt")
+            _require(isinstance(original.get("started_at"), str) and isinstance(original.get("finished_at"), str),
+                     "Original research timestamps are required")
+            research_started, research_finished = _time(original["started_at"]), _time(original["finished_at"])
+            _require(started <= research_started <= research_finished <= finished
+                     and (attempt["elapsed_seconds"] is None or
+                          abs((research_finished - research_started).total_seconds() - attempt["elapsed_seconds"]) <= LAYERED_TIME_TOLERANCE),
+                     "Original research timing must match its audited run and duration")
+            _require(all(started <= _time(prior["retrieved_at"]) <= research_finished
+                         and (prior["published_at"] is None or
+                              _time(prior["published_at"]) <= _time(prior["retrieved_at"])) for prior in prior_sources),
+                     "Original research cannot finish before its retained sources")
+            _require(all(source["status"] == "ok" and _time(source["retrieved_at"]) > research_finished for source in resolved),
+                     "Coverage resolution needs successful evidence retrieved after the original result")
+            for name in prior_gaps:
+                _require(any(source["id"] in metadata["checks"][name]["source_ids"]
+                             and source_matches(name, source["url"]) for source in resolved),
+                         "Coverage resolution must bind later evidence for every original gap")
+            warnings.append({"code": "research_coverage_resolved", "path": f"model_calls[{index}]"})
         if call["status"] == "ok":
             _require(not call["error"], "Successful model stage cannot contain an error")
         elif call["status"] == "partial":
-            _require(allow_partial and coverage_gaps, "Partial research requires an explicit coverage policy and real gaps")
+            _require(allow_partial and (coverage_gaps or resolution is not None),
+                     "Partial research requires an explicit coverage policy and real gaps or verified resolution")
             warnings.append({"code": "research_partial", "path": f"model_calls[{index}]"})
         else:
             _require(bool(call["error"].strip()), "Failed model stage needs an error")
@@ -501,12 +621,17 @@ def _validate_audit(directory):
         _require(set(decision["history_entry_ids"]) <= history_ids, "History references must exist in the retained index")
         linked = references(decision["source_ids"])
         candidate = by_event[key]
-        matching = [s for s in linked if s["status"] == "ok" and s["url"] == candidate["source_url"]
+        versions = [(s, source_text.get(s["id"], "")) for s in linked]
+        versions.extend((retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
+                        for s in linked if s["id"] in retained_sources)
+        candidate_versions = [(retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
+                              for s in linked if s["id"] in retained_sources] if retained_sources else versions
+        matching = [(s, text) for s, text in candidate_versions if s["status"] == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
                     and _time(s["retrieved_at"]) == _time(candidate["retrieved_at"])]
         _require(bool(matching), "Candidate needs matching publication, retrieval and source evidence")
-        _require(any(candidate["evidence"] in source_text[s["id"]] for s in matching), "Candidate evidence must occur in the retained source text")
+        _require(any(candidate["evidence"] in text for _, text in matching), "Candidate evidence must occur in the retained source text")
         if decision["disposition"] in {"duplicate", "update"}:
             _require(bool(decision["history_entry_ids"]), "Duplicate/update decisions require history entry references")
         if decision["disposition"] == "update":
@@ -518,7 +643,9 @@ def _validate_audit(directory):
             _require(candidate["source_type"] == "primary", "Selected candidates require primary source evidence")
             age = (as_of - _time(candidate["published_at"])).total_seconds()
             _require(0 <= age <= metadata["window_hours"] * 3600, "Selected candidate is outside the research window")
-            _require(all(s["status"] == "ok" for s in linked), "Selected evidence contains a failed source")
+            _require(all(any(version["id"] == s["id"] and version["status"] == "ok"
+                             for version, _ in versions) for s in linked),
+                     "Selected evidence contains a failed source")
     _require(set(decisions) == set(by_event), "Every candidate needs a selection or exclusion decision")
 
     selected = {key for key, decision in decisions.items() if decision["disposition"] in SELECTED}
