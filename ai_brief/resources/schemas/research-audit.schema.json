@@ -580,6 +580,25 @@
                 }
               ]
             }
+          },
+          "coverage_resolution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_ids"
+            ],
+            "properties": {
+              "source_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                }
+              }
+            }
           }
         },
         "required": [
