@@ -744,11 +744,15 @@
                   "qwen_blog",
                   "glm_models",
                   "deepseek_models",
-                  "qwen_models"
+                  "qwen_models",
+                  "discovery_memory",
+                  "discovery_scheduling",
+                  "discovery_compute",
+                  "discovery_data_path"
                 ]
               },
               "minItems": 1,
-              "maxItems": 19,
+              "maxItems": 23,
               "uniqueItems": true
             },
             "text": {
@@ -766,7 +770,10 @@
       ]
     },
     "coverage_contract": {
-      "const": "daily_required_v1"
+      "enum": [
+        "daily_required_v1",
+        "daily_required_v2"
+      ]
     },
     "budget_policy": {
       "const": "successful_work_hourly_continuation_v1"
@@ -955,6 +962,272 @@
           ]
         }
       }
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "queries": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+              },
+              "family": {
+                "enum": [
+                  "discovery_memory",
+                  "discovery_scheduling",
+                  "discovery_compute",
+                  "discovery_data_path"
+                ]
+              },
+              "mode": {
+                "enum": [
+                  "current",
+                  "backscan",
+                  "followup"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "web_search",
+                  "github_search"
+                ]
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "pattern": "\\S"
+              },
+              "since": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "until": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "source_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+              },
+              "result_limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20
+              },
+              "results": {
+                "type": "array",
+                "maxItems": 20,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "format": "uri",
+                      "pattern": "^https?://",
+                      "maxLength": 4000
+                    },
+                    "repository_url": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "uri",
+                          "pattern": "^https?://",
+                          "maxLength": 4000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "disposition": {
+                      "enum": [
+                        "selected",
+                        "update",
+                        "duplicate",
+                        "insufficient_evidence",
+                        "out_of_scope",
+                        "watch"
+                      ]
+                    },
+                    "novelty": {
+                      "enum": [
+                        "new_event",
+                        "new_evidence",
+                        "old_discovery",
+                        "unverified"
+                      ]
+                    },
+                    "source_ids": {
+                      "type": "array",
+                      "uniqueItems": true,
+                      "maxItems": 30,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,79}$"
+                      }
+                    },
+                    "event_key": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "pattern": "\\S"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2000,
+                      "pattern": "\\S"
+                    },
+                    "next_step": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "baseline_url": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "format": "uri",
+                          "pattern": "^https?://",
+                          "maxLength": 4000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "repository_url",
+                    "disposition",
+                    "novelty",
+                    "source_ids",
+                    "event_key",
+                    "reason",
+                    "next_step",
+                    "baseline_url"
+                  ]
+                }
+              },
+              "page": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "followup_of": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https?://",
+                    "maxLength": 4000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "attempt": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "response_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "id",
+              "family",
+              "mode",
+              "provider",
+              "query",
+              "since",
+              "until",
+              "source_id",
+              "result_limit",
+              "results",
+              "page",
+              "truncated",
+              "followup_of",
+              "attempt",
+              "response_sha256"
+            ]
+          }
+        },
+        "backscan": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "performed",
+                "budget_deferred"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ]
+        },
+        "followup": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "performed",
+                "none_due",
+                "budget_deferred"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "queries",
+        "backscan",
+        "followup"
+      ]
     }
   },
   "required": [
@@ -1103,7 +1376,11 @@
                 "qwen_blog",
                 "glm_models",
                 "deepseek_models",
-                "qwen_models"
+                "qwen_models",
+                "discovery_memory",
+                "discovery_scheduling",
+                "discovery_compute",
+                "discovery_data_path"
               ]
             },
             "required": [
@@ -1393,6 +1670,70 @@
         "properties": {
           "schema_version": {
             "const": "1.4"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "coverage_contract"
+        ],
+        "properties": {
+          "coverage_contract": {
+            "const": "daily_required_v2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "discovery"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "1.4"
+          },
+          "checks": {
+            "required": [
+              "discovery_memory",
+              "discovery_scheduling",
+              "discovery_compute",
+              "discovery_data_path"
+            ]
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": [
+            "discovery"
+          ]
+        },
+        "properties": {
+          "checks": {
+            "propertyNames": {
+              "enum": [
+                "model_serving",
+                "hardware",
+                "model_architecture",
+                "embodied_training",
+                "small_models",
+                "inference_engines",
+                "vllm",
+                "sglang",
+                "deepinfer",
+                "vllm_blog",
+                "sglang_blog",
+                "lmsys_blog",
+                "deepseek_articles",
+                "deepinfer_articles",
+                "glm_blog",
+                "qwen_blog",
+                "glm_models",
+                "deepseek_models",
+                "qwen_models"
+              ]
+            }
           }
         }
       }

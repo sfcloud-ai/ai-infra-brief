@@ -1,4 +1,20 @@
-# 真实晨报私有审计包 v1.3
+# 真实晨报私有审计包 v1.4
+
+## 当前跨仓发现合同（下一新期）
+
+Coverage-Contract: daily_required_v2
+
+使用本提示词冻结的新请求采用 `schema_version=1.4`、`coverage_contract=daily_required_v2`。原十九项固定检查继续保留，另加 `discovery_memory`、`discovery_scheduling`、`discovery_compute`、`discovery_data_path` 四项，分别审计显存容量/分层、共享调度隔离、计算吞吐/内核/驱动、通信数据路径。`source_matches` 的固定来源规则不因某个任意 GitHub URL 而放宽。冻结旧提示词的原包与续页仍按原合同审计，不改写历史。
+
+元数据新增 `discovery`：`queries`（最多16条）、`backscan`、`followup`。每条查询保存 `id,family,mode,provider,query,since,until,source_id,attempt,response_sha256,result_limit,page,truncated,followup_of,results`；精确字段以同版本 research-audit.schema.json 为准。`source_id` 指向实际 GET 的既有 source 记录，保留 URL、原始 JSON/XML 响应哈希与预算 attempt_records；q 必须等于实际查询。不得把原生 web 工具搜索伪装成 GET、捏造 endpoint 或只存整理后的命中列表。同一 URL 重试保留同一 source ID 与累计 attempt_records，query 的 attempt 为1起始的实际尝试序号，response_sha256 绑定该次原响应；旧响应保存为 evidence/<sha256>.txt，旧 query 不改，追加新 query 与真实尝试，不拆 source 重置额度。当前窗口 `since=as_of-window_hours`、`until=as_of`；实际请求能表达的时间精度由 query 原样记录，候选日期仍单独核验。
+
+支持 `github_search`：`https://api.github.com/search/repositories` 或 `/search/issues`，显式 `q`、`per_page<=20`、`page<=2`；结果取原 `items[].html_url`；`incomplete_results=true` 时保留原结果与取舍、标记 `truncated=true`，只能作为真实缺口，不能据此完成检查或宣称无结果。备用 `web_search` 为可用的 `https://www.bing.com/search?q=...&format=rss&count<=20`，保存完整原始 RSS；RSS 没有可靠总量，`truncated=true`。每个返回 URL 都有且仅有一条原序取舍，不能只保留喜欢的结果。错误 JSON、空白页、HTML/动态壳不能标为成功空结果；失败按原 source 状态、failure_kind、重试与计时记录。有限排名/分页完成不等于穷尽 GitHub。
+
+每条结果记录 `url,repository_url,disposition,novelty,source_ids,event_key,reason,next_step,baseline_url`。canonical repository 为 `https://github.com/owner/repo`；结果与项目必须对应。`disposition` 沿用候选取舍并增加 `watch`；`novelty` 为 `new_event/new_evidence/old_discovery/unverified`。入选/更新绑定真实候选 event_key、相同决策及一手项目正文；新证据增量保留 baseline_url 及其原文。旧发现不能入选为今日事件；watch 必须写具体下一步。机器检查来源结构、原字节和关联，维护者身份、事实、业务相关性、benchmark 可比性仍由独立内容审查确认。
+
+每个 discovery check 的 source_ids 恰好列出本问题族所有 current 查询的去重来源ID；成功完成至少有一条完整的有限搜索响应。`not_checked` 必须没有 current 操作；失败记录不能伪装空结果。未完成的前三类映射到模型服务页，数据路径类映射到硬件页，沿原待补页/缺口说明规则处理，其他已核验页可以继续。backscan/followup 记录 `status,reason`；实际执行为 performed，各最多两条查询、最多90天；预算不足为 budget_deferred，无待追踪项可用 followup.none_due。定向 followup 引用此前保留的结果 URL 或冻结历史来源，不能代替当前四类跨仓发现。
+
+续页保留原 discovery 查询/候选记录前缀不变，追加真实补证，保留原输入和预算；coverage_resolution 也必须保存原阶段输出中的 discovery。摘要不公开私有查询和理由。Reports 继续核对可信审计器的声明、原 plan 哈希、完整检查集合和归档元数据；宿主不独立重跑检索或解析固定 Prompt，不能把这一边界说成宿主独立事实核验或防伪审计证明。
 
 ## 六主题交付与缺页接续（2026-11-13 起的当前要求）
 
@@ -50,7 +66,7 @@
 
 ## 新日报完整覆盖合同
 
-`schema_version=1.3` 必须声明 `coverage_contract=daily_required_v1`，并逐项填写以下十九个 `checks`。研究方向与来源检查相互补充，最终入选篇数不设配额。
+以下十九项是两个覆盖版本共用的固定检查。仅历史冻结的 `schema_version=1.3` 必须声明 `coverage_contract=daily_required_v1`，并逐项填写以下十九个 `checks`。研究方向与来源检查相互补充，最终入选篇数不设配额。
 
 - 六个方向：`model_serving`（模型服务与超配）、`hardware`（硬件）、`model_architecture`（模型架构）、`embodied_training`（具身训练）、`small_models`（小模型）、`inference_engines`（推理引擎）。
 - 十三组来源：`vllm`、`sglang`、`deepinfer`、`vllm_blog`、`sglang_blog`、`lmsys_blog`、`deepseek_articles`、`deepinfer_articles`、`glm_blog`、`qwen_blog`、`glm_models`、`deepseek_models`、`qwen_models`。
@@ -114,7 +130,7 @@ v1.0、v1.1 保持原覆盖门槛。只有任务明确采用“发布已核实�
 
 metadata 和 summary 必须显式绑定 `budget_policy=successful_work_hourly_continuation_v1`。
 
-仅在对应 T4 `research_plan_v4`（或旧计划已追加宿主批准的 recovery grant）、恢复策略和验证器已部署时启用；`1.0`–`1.3` 和原计划不可事后改写。v1.4 继续 `daily_required_v1`、全部十九项 checks、事实/草稿/提示词绑定以及 partial 条件。
+仅在对应 T4 `research_plan_v4`（或旧计划已追加宿主批准的 recovery grant）、恢复策略和验证器已部署时启用；`1.0`–`1.3` 和原计划不可事后改写。v1.4 的覆盖版本由原冻结提示词标记决定：本版本新期为 `daily_required_v2`，包含全部二十三项 checks；旧冻结输入继续 `daily_required_v1` 的十九项检查。事实/草稿/提示词绑定以及 partial 条件均保留。
 
 `limits` 精确包含 `source_attempts`、`model_attempts`（成功次数额度，各最多 2）、`source_attempt_seconds`（单次网络读取上限，最多 180 秒）、`model_stage_seconds`（成功阶段操作上限，最多 3600 秒）、`run_seconds`（累计成功操作耗时额度，最多 3600 秒），值必须与 T4 原计划或已批准 grant 所提供的有效预算逐项一致。旧计划恢复在独立归档记录采用时间、grant SHA、新验证器 SHA 与原输入 SHA，不修改原计划、原失败或原提示词。真实失败和 timeout 保留实际耗时及次数，但不扣成功额度；不能把未知结果标为失败释放额度。未知结果或未知耗时保守保留该操作原 reserved_seconds 与实际已知耗时两者中的较大额度，不补零。网络有限重试与阶段接续由 T4 原授权策略控制，按下一可执行小时 :20 恢复未完成任务，不绕过授权或无限热循环。
 
@@ -130,8 +146,10 @@ source 累计 elapsed_seconds 包含请求、等待和退避，不与单次网�
 
 v1.4 的研究阶段因真实来源缺口完成为 `partial/coverage_incomplete` 后，后续获准读取可以补齐覆盖，无须重放已完成的模型阶段。保留原状态、错误、输入、结果、结束时间和累计预算；在该 model call 增加 `coverage_resolution: {"source_ids": ["实际补证来源ID"]}`，不把原 `partial` 改成 `ok`。
 
-此路径要求当前十九项检查全部完成，并保存原结果所绑定的原研究输出为 `stage_artifacts/<output_sha256>.json`。原输出须有真实 `failed` 检查、完整候选和来源尝试；当前候选不变，原尝试逐项保留。每个原缺口都须绑定研究结束后成功读取的对应来源正文。审计保留 `research_partial`，另报 `research_coverage_resolved`；来源范围仍由内容审查核实，不能把单篇追溯写成全站覆盖。
+此路径要求原冻结覆盖合同的全部检查完成（v1十九项、v2二十三项），并保存原结果所绑定的原研究输出为 `stage_artifacts/<output_sha256>.json`。原输出须有真实 `failed` 检查、完整候选和来源尝试；当前候选不变，原尝试逐项保留。每个原缺口都须绑定研究结束后成功读取的对应来源正文。审计保留 `research_partial`，另报 `research_coverage_resolved`；来源范围仍由内容审查核实，不能把单篇追溯写成全站覆盖。
 
 复用来源 ID 的补读必须追加实际计费尝试。若响应内容变化，旧正文另存为 `evidence/<原content_sha256>.txt` 并校验原哈希；未变化时复用原证据文件。原研究开始、结束和耗时须与审计运行区间一致，结束不能早于原输出中的来源读取时间。旧覆盖失败类型也须与当时对应来源记录一致。
 
 该路径不授权新读取、不扩张预算，不支持用旧结果承接新候选，也不豁免失败阶段、未知操作、缺失检查、编辑或页级交付要求。草稿及公开覆盖说明随实际补证更新，审校时间另记，原件不覆盖。
+
+发现线索的后续追踪以本次已保存查询结果或冻结 history 的 source_urls 为依据；这次合同不自动导入昨日未入选的私有 watchlist。需追踪未入选旧项目时，在本期有限回扫中重新取得真实命中并保存原响应，再进行 followup，不伪造历史或今日新事件。续页可为原 failed discovery source 追加实际尝试，旧查询和响应、原 source ID 与累计预算均保留；已发布页的检查和其他旧来源不变。

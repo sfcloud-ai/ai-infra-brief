@@ -73,7 +73,7 @@
 
 ## 正式新日报的完整覆盖审计
 
-正式 `new_daily` 读取同一固定 Git commit 的[私有审计合同 audit.md](audit.md)，使用 `schema_version=1.3`、`coverage_contract=daily_required_v1`，逐项记录六个研究方向和十三组官方来源的真实核查。检查范围与最终文章数量分开：每个方向可以没有合格新闻，但必须实际检查；一家引擎的 PR 不能代替模型、训练、小模型或博客的核查。
+正式 `new_daily` 读取同一固定 Git commit 的[私有审计合同 audit.md](audit.md)，按该冻结 audit.md 的 Coverage-Contract 标记选合同：本版本新期使用 `schema_version=1.4`、`coverage_contract=daily_required_v2`，逐项记录六个研究方向、十三组官方来源和四类跨仓发现的真实核查。旧冻结提示词无该标记时，保留其原 `schema_version=1.3` 或1.4、`coverage_contract=daily_required_v1`，不事后升级原请求。检查范围与最终文章数量分开：每个方向可以没有合格新闻，但必须实际检查；一家引擎的 PR 不能代替模型、训练、小模型或博客的核查。
 
 提交发布前运行 `audit-research`，保存其原始结果及输入绑定。`not_checked`、遗漏必查项、事实或去重错误、已知预算超限均须处理后继续；实际访问失败且已核验的其他内容可独立成立时，按已确定的部分晨报政策保留证据、公开完整缺口。计时记录缺失如实告警，不单独阻止发布，也不重置重试预算。审计通过后沿原授权继续内容审查、发布和投递回执核验，任务目标仍是完成晨报。
 
@@ -93,4 +93,4 @@
 
 此通知合同不扩大 `new_daily` 私有审计的适用范围，也不把未核验内容变成可发布事实。完整格式见报告仓库的 [同日修订通知](https://github.com/sfcloud-ai/ai-infra-reports/blob/main/docs/revision-notifications.md)。
 
-新版已部署且 T4 原计划为 `research_plan_v4`，或旧 `research_plan_v3` 已取得绑定原请求与原计划哈希的有效恢复授权、由 T4 返回分层 effective_budget 时，使用 `schema_version=1.4` 分层预算合同，保持 `daily_required_v1` 全部覆盖要求。无此授权的旧计划仍按原版本执行。获准恢复也不改写旧计划、固定仓库输入、原失败或历史预算记录；新增实际输入和结果以新的哈希归档并保留前次链。模型阶段开始前固定完整实际输入；结束即固定结果与结束时间，协调和归档时间计入整轮而不混作模型阶段。有限恢复遵循原 T4 操作与剩余额度，不丢弃失败记录、不重开预算。
+新版已部署且 T4 原计划为 `research_plan_v4`，或旧 `research_plan_v3` 已取得绑定原请求与原计划哈希的有效恢复授权、由 T4 返回分层 effective_budget 时，使用 `schema_version=1.4` 分层预算合同，覆盖版本仍由同一冻结 audit.md 的 Coverage-Contract 标记决定，本版本新期为 `daily_required_v2`，保留全部十九项固定检查并增加四类跨仓发现；旧冻结输入沿用 v1。无此授权的旧计划仍按原版本执行。获准恢复也不改写旧计划、固定仓库输入、原失败或历史预算记录；新增实际输入和结果以新的哈希归档并保留前次链。模型阶段开始前固定完整实际输入；结束即固定结果与结束时间，协调和归档时间计入整轮而不混作模型阶段。有限恢复遵循原 T4 操作与剩余额度，不丢弃失败记录、不重开预算。
