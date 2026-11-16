@@ -20,7 +20,7 @@ NOTICE_LABELS = dict(zip(TOPICS, ("服务", "硬件", "架构", "具身", "小�
 
 def notice_prefix(checks):
     """按方向压缩公开缺口标题，完整来源缺口仍保存在审计记录中。"""
-    groups = {name if name in TOPICS else ("model_architecture" if name in
+    groups = {("hardware" if name == "discovery_data_path" else "model_serving") if name.startswith("discovery_") else name if name in TOPICS else ("model_architecture" if name in
               {"glm_blog", "qwen_blog", "glm_models", "deepseek_models", "qwen_models", "deepseek_articles"}
               else "inference_engines") for name in checks}
     return "部分晨报｜覆盖缺口：" + "、".join(NOTICE_LABELS[name] for name in TOPICS if name in groups) + "。"

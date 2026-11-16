@@ -59,7 +59,8 @@ class ResearchAuditTests(unittest.TestCase):
                             for stage in ("research", "editor")],
         }
         for name in ("research.md", "editor.md", "sources.md", "delivery.md", "audit.md"):
-            data = (RESOURCE_ROOT / "prompts" / name).read_bytes()
+            # 这些用例使用冻结的旧提示词验证历史合同。
+            data = ("Synthetic legacy frozen prompt: " + name).encode()
             self.root.joinpath("prompts", name).write_bytes(data)
             self.audit["inputs"]["prompt_hashes"][name] = hashlib.sha256(data).hexdigest()
         self.save()

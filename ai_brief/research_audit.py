@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from .contracts import parse_time, validate
 from .storage import BriefError
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
+from . import discovery as community
 
 
 # 仅容纳新版真实计时求和的浮点误差，不修改预留声明、次数或原始耗时。
@@ -121,6 +122,10 @@ def _validate_audit(directory):
         # 不把完整候选、摘录或私人路径回显到运行日志。
         raise BriefError("Invalid research-audit metadata schema") from exc
     page_scope = metadata.get("page_scope")
+    discovery_contract = metadata.get("coverage_contract") == community.CONTRACT
+    required_checks = (*REQUIRED_CHECKS, *community.CHECKS) if discovery_contract else REQUIRED_CHECKS
+    page_checks = {page: (*checks, *community.PAGE_CHECKS.get(page, ())) if discovery_contract else checks
+                   for page, checks in PAGE_CHECKS.items()}
     ready_pages, pending_checks = [], set()
     previous_metadata = previous_report = previous_summary = None
     old_pages, current_revision = [], 1
@@ -218,10 +223,17 @@ def _validate_audit(directory):
                 _require(metadata["inputs"][key] == previous_metadata["inputs"][key], "Successor must retain original research inputs")
             _require(_time(metadata["finished_at"]) >= _time(previous_metadata["finished_at"]),
                      "Successor cannot precede its previous completed audit")
-            _require(metadata["sources"][:len(previous_metadata["sources"])] == previous_metadata["sources"],
+            _require(metadata.get("coverage_contract") == previous_metadata.get("coverage_contract"),
+                     "Successor must preserve the original coverage contract")
+            _require(community.successor_sources_preserved(metadata, previous_metadata) if discovery_contract else
+                     metadata["sources"][:len(previous_metadata["sources"])] == previous_metadata["sources"],
                      "Successor must preserve all prior source records")
+            if discovery_contract:
+                prior_queries = previous_metadata["discovery"]["queries"]
+                _require(metadata["discovery"]["queries"][:len(prior_queries)] == prior_queries,
+                         "Successor must preserve all prior discovery records")
             for page in old_pages:
-                for name in PAGE_CHECKS[page]:
+                for name in page_checks[page]:
                     _require(metadata["checks"][name] == previous_metadata["checks"][name],
                              "Previously verified page checks must remain unchanged")
             previous_calls = {call["stage"]: call for call in previous_metadata["model_calls"]}
@@ -259,14 +271,16 @@ def _validate_audit(directory):
                                  or 0xd800 <= ord(c) <= 0xdfff for c in reason),
                      "Pending page reason contains forbidden characters or whitespace")
             _require(len(reason.encode("utf-8")) <= 300, "Pending page reason exceeds UTF-8 byte limit")
-        pending_checks = {name for page in pending_pages for name in PAGE_CHECKS[page]}
+        pending_checks = {name for page in pending_pages for name in page_checks[page]}
         _require(all(metadata["checks"][name]["status"] in {"checked", "no_qualifying_items"}
-                     for page in ready_pages for name in PAGE_CHECKS[page]),
+                     for page in ready_pages for name in page_checks[page]),
                  "Ready pages require every assigned check to be completed")
     layered_budget = metadata["schema_version"] == "1.4"
     complete_contract = metadata["schema_version"] in {"1.3", "1.4"}
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
         _require(hashlib.sha256(read(f"prompts/{name}")).hexdigest() == expected, "Prompt fingerprint mismatch")
+    new_prompt = community.PROMPT_MARKER.encode() in read("prompts/audit.md")
+    _require(discovery_contract == new_prompt, "Coverage contract must match the original frozen audit prompt")
     history_bytes = read("history.json")
     _require(hashlib.sha256(history_bytes).hexdigest() == metadata["inputs"]["history_sha256"], "History fingerprint mismatch")
     history = _json(history_bytes, "history")
@@ -432,13 +446,15 @@ def _validate_audit(directory):
         return [sources[i] for i in ids]
 
     allow_partial = metadata.get("coverage_policy") == "publish_verified_with_gaps"
+    discovery_read = lambda path: read(path, MAX_PACKAGE_BYTES)
+    discovery_refs = community.validate_discovery(metadata, sources, source_text, candidates, history, _require, _time, discovery_read, previous_metadata) if discovery_contract else {}
     coverage_gaps, unchecked, checked = [], [], []
     if complete_contract:
-        _require(metadata.get("coverage_contract") == CONTRACT and set(metadata["checks"]) == set(REQUIRED_CHECKS),
+        _require(metadata.get("coverage_contract") == (community.CONTRACT if discovery_contract else CONTRACT) and set(metadata["checks"]) == set(required_checks),
                  "Daily coverage requires every research direction and official source group")
     for name, check in metadata["checks"].items():
         linked = references(check["source_ids"])
-        matching = [s for s in linked if source_matches(name, s["url"])] if complete_contract else linked
+        matching = linked if name in discovery_refs else [s for s in linked if source_matches(name, s["url"])] if complete_contract else linked
         if check["status"] in {"checked", "no_qualifying_items"}:
             _require(any(s["status"] == "ok" and (not complete_contract or s["attempts"] > 0) for s in matching),
                      "Completed coverage needs a successful source read from its required source group")
@@ -554,11 +570,22 @@ def _validate_audit(directory):
                     _require(prior["status"] != "ok" or bool(retained_source_text[prior["id"]].strip()),
                              "Original successful source evidence is empty")
                 retained_sources[prior["id"]] = prior
+            if discovery_contract:
+                prior_discovery = output.get("discovery")
+                _require(isinstance(prior_discovery, dict), "Original discovery record required for coverage resolution")
+                prior_metadata = dict(metadata, checks=prior_checks, discovery=prior_discovery, sources=prior_sources)
+                try:
+                    validate("research-audit", prior_metadata)
+                except BriefError as exc:
+                    raise BriefError("Invalid original discovery schema") from exc
+                community.validate_discovery(prior_metadata, prior_by_id, retained_source_text, candidates, history, _require, _time, discovery_read, previous_metadata)
+                _require(metadata["discovery"]["queries"][:len(prior_discovery["queries"])] == prior_discovery["queries"],
+                         "Coverage resolution must append discovery evidence without rewriting original queries")
             for name, check in prior_checks.items():
                 ids = check.get("source_ids")
                 _require(isinstance(ids, list) and ids and all(isinstance(i, str) and i in prior_by_id for i in ids),
                          "Original coverage requires retained source references")
-                matching = [prior_by_id[i] for i in ids if source_matches(name, prior_by_id[i]["url"])]
+                matching = [prior_by_id[i] for i in ids if (discovery_contract and name in community.CHECKS) or source_matches(name, prior_by_id[i]["url"])]
                 if check["status"] != "failed":
                     _require(any(s["status"] == "ok" for s in matching), "Original completed coverage needs successful evidence")
                     continue
@@ -593,7 +620,7 @@ def _validate_audit(directory):
                      "Coverage resolution needs successful evidence retrieved after the original result")
             for name in prior_gaps:
                 _require(any(source["id"] in metadata["checks"][name]["source_ids"]
-                             and source_matches(name, source["url"]) for source in resolved),
+                             and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"])) for source in resolved),
                          "Coverage resolution must bind later evidence for every original gap")
             warnings.append({"code": "research_coverage_resolved", "path": f"model_calls[{index}]"})
         if call["status"] == "ok":
@@ -756,7 +783,7 @@ def _validate_audit(directory):
     if metadata["schema_version"] in {"1.2", "1.3", "1.4"}:
         result["coverage_incomplete"] = sorted(coverage_gaps)
     if complete_contract:
-        result.update(coverage_contract=CONTRACT, required_checks=list(REQUIRED_CHECKS),
+        result.update(coverage_contract=metadata["coverage_contract"], required_checks=list(required_checks),
                       coverage_checked=sorted(checked), coverage_unchecked=sorted(unchecked), limits=dict(limits),
                       inputs={key: metadata["inputs"][key] for key in
                               ("prompt_commit", "history_commit", "prompt_hashes", "history_sha256", "draft_sha256")})
