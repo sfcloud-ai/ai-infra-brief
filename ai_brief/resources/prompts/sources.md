@@ -50,7 +50,7 @@
 | `vllm_blog` | [vLLM 官方博客](https://vllm.ai/blog) · [完整归档](https://vllm.ai/blog/archive) | 固定核查机制、算子/库接入、融合、并行与服务性能技术文章；从正文追溯实现和 benchmark。当前文章可经页面的 View Markdown Source 核对 front matter 发布时间，不用 Git 提交时间代替。 |
 | `sglang_blog` | [SGLang 官方博客](https://www.sglang.io/blog) · [LMSYS 历史博客](https://www.lmsys.org/blog/) | 固定核查内核融合、推测解码、缓存与端到端服务分析；历史入口作为补充，需确认作者与项目归属。区分真实生成、固定接受长度模拟和只计 decode 的测量。 |
 | `lmsys_blog` | [LMSYS 博客](https://www.lmsys.org/blog/) | 与 SGLang 当前博客分别核查、按事件去重；确认作者和项目归属。 |
-| `deepseek_research` | [DeepSeek 研究与动态](https://www.deepseek.com/news/) | 固定核查官方技术文章、模型机制和发布说明，沿正文读取原始论文与实现。API 生效时间不等于文章发布时间，发布权重不自动入选。 |
+| `deepseek_research` | [DeepSeek 研究与动态](https://www.deepseek.com/news/) | 固定核查官方技术文章、模型机制和发布说明，沿正文读取原始论文与实现。API 生效时间不等于文章发布时间，重点厂商已核验的新模型发布按下文专项规则优先处理；单纯重传已有权重不视为新模型事件。 |
 | `deepseek_infra_articles` | [DeepSeek 官方基础设施文章索引](https://github.com/deepseek-ai/open-infra-index) | 固定核查系统设计、算子库与推理基础设施文章，沿索引进入具体论文、技术说明和官方项目；索引年月或仓库更新时间不是文章精确发布时间。 |
 | `vllm` | [发布](https://github.com/vllm-project/vllm/releases) · [PR](https://github.com/vllm-project/vllm/pulls) · [提交](https://github.com/vllm-project/vllm/commits) | 统一引擎文章内的小节：KV/状态、调度、适配、内核、正确性及性能回归；区分提案、合并和已发布。 |
 | `sglang` | [发布](https://github.com/sgl-project/sglang/releases) · [PR](https://github.com/sgl-project/sglang/pulls) · [提交](https://github.com/sgl-project/sglang/commits) | 统一引擎文章内的小节：缓存、分离部署、内核与新架构；不照抄全部 changelog。 |
@@ -74,3 +74,13 @@
 - **DeepInfer**：官方项目可确认为 `deepseek-ai/DeepInfer`，与 FlashInfer 是不同项目；按原文辨认外部库接入和引擎自研融合，不擅自替换项目名。硬件/模型支持和开源范围会变化，必须读取当期版本，不能将离线推理组件默认当作 vLLM/SGLang 等在线服务的等价替代。
 - **发布时间精度**：部分 SGLang/DeepSeek 正文只公开日期，部分基础设施索引只公开年月。先查官方文章元数据或原始发布记录；无法确认带时区时间时保留已知精度并记为待核验线索，不编造午夜、时区，不以检索时间替代。当前候选 schema 要求完整时间戳，未补齐前不得伪造字段纳入候选，也不能把访问成功但时间待核验说成无合格新项。
 - 本目录不新增爬虫、RSS、API 凭据、定时器或投递动作；本地 mock 仅将目录作为随包资源纳入实现指纹，不执行联网读取。真实晨报任务按 research.md 的明确要求读取目录；不得把“文件已打包”描述成“采集已接通”。
+
+## 重点模型发布与超配评估（2026-11-17 新期规则）
+
+本节适用于下一新期，不改写已冻结的旧期输入、预算、已发布内容或发送记录；保留原六主题、十三来源组、四类跨仓发现及所有证据、审计和去重门禁。不因本节新增未知 schema 字段或新增投递动作。
+
+- 每期分别检查 DeepSeek、Qwen、GLM/Z.ai 的官方模型发布渠道：官网的新闻/发布页和技术博客、官方 GitHub 项目/release，以及官方 Hugging Face/ModelScope 权重和配置。官方社交公告用于交叉核对发布事实和时间，账号归属须从官网或已确认官方项目验证，不把同名账号或第三方镜像当官方。博客检查、发布公告检查和权重检查不能互相替代。
+- 从本目录的厂商官网和官方组织入口继续定位当前发布渠道；渠道迁移、动态空壳、接口分页不全时核对其他官方入口，记录实际范围，不以一个旧列表证明没有新发布。不存在或未确认的渠道明确记为未知，不猜 URL。
+- 特别优先总参数 30–80B（含端点）和 200–500B（含端点）的新模型；MoE 必须同时记录总参数和激活参数，按总参数分组，不能把 A3B 等激活规模作为驻留权重大小。其他规模和参数未公开的重大发布仍检查，不因未落入两个区间而跳过。
+- 区分公告发布、API 上线、架构公开、正式权重可下载和后续量化版本。闭源/API 模型也记录发布事实，但不据此声称能本地部署。
+- 发布时间冲突时保留各来源日期、字段含义与时区精度，继续核对官网发布页、具体官方公告及权重首次发布记录。不得因单个 OG/模板日期直接淘汰重大已发现事件，也不得编造完整时间戳满足 schema。无法解决则交接为明确待核验事件及下一步，不写成无更新。
