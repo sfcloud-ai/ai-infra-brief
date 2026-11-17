@@ -1,6 +1,7 @@
 """只读验证真实晨报的私有证据包，不联网、不发布、不修改投递状态。"""
 
 from datetime import date
+from decimal import Decimal, localcontext
 import base64
 import binascii
 import hashlib
@@ -12,8 +13,10 @@ from zoneinfo import ZoneInfo
 
 from .contracts import parse_time, validate
 from .storage import BriefError
+from .source_identity import source_identity
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 from . import discovery as community
+from .research_continuation import validate_continuation, validate_current_outputs
 
 
 # 仅容纳新版真实计时求和的浮点误差，不修改预留声明、次数或原始耗时。
@@ -225,8 +228,7 @@ def _validate_audit(directory):
                      "Successor cannot precede its previous completed audit")
             _require(metadata.get("coverage_contract") == previous_metadata.get("coverage_contract"),
                      "Successor must preserve the original coverage contract")
-            _require(community.successor_sources_preserved(metadata, previous_metadata) if discovery_contract else
-                     metadata["sources"][:len(previous_metadata["sources"])] == previous_metadata["sources"],
+            _require(community.successor_sources_preserved(metadata, previous_metadata),
                      "Successor must preserve all prior source records")
             if discovery_contract:
                 prior_queries = previous_metadata["discovery"]["queries"]
@@ -331,6 +333,134 @@ def _validate_audit(directory):
                   "failed_seconds": 0, "unknown_attempts": {"source": 0, "model": 0},
                   "reserved_unknown_seconds": 0, "charged_seconds": 0}
 
+    cancelled_operations = set()
+    cancelled_observations = {}
+
+    def timestamp_not_before(later, earlier, allow_precision=True):
+        """仅拒绝记录精度区间已确定反向的顺序，不虚构更细时间。"""
+        def lower(value):
+            parsed = _time(value)
+            match = re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.([0-9]+))?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", value)
+            _require(match is not None, "Unsupported observation timestamp precision")
+            digits = match.group(1) if match and match.group(1) else ""
+            seconds = Decimal(int(parsed.replace(microsecond=0).timestamp()))
+            return seconds + Decimal("0." + (digits or "0")), Decimal(1).scaleb(-len(digits))
+        _require(isinstance(later, str) and isinstance(earlier, str), "Invalid audit timestamp")
+        with localcontext() as context:
+            context.prec = max(len(later), len(earlier)) + 20
+            late, precision = lower(later)
+            early, _ = lower(earlier)
+            return late + precision > early if allow_precision else late >= early
+
+
+    def retained_not_dispatched(attempt, record):
+        operation_id = attempt["operation_id"]
+        _require(operation_id not in cancelled_operations, "Duplicate not-dispatched operation")
+        cancelled_operations.add(operation_id)
+        def artifact(sha):
+            data = read(f"stage_artifacts/{sha}.json", MAX_PACKAGE_BYTES)
+            _require(hashlib.sha256(data).hexdigest() == sha, "Not-dispatched evidence fingerprint mismatch")
+            return _json(data, "not-dispatched evidence")
+        result = artifact(attempt["not_dispatched_evidence_sha256"])
+        expected_request = "morning-" + metadata["date"].replace("-", "") + "-r1"
+        try:
+            expected_input = source_identity(record["url"])["hash"]
+            artifact_input = source_identity(result.get("url"))["hash"] if isinstance(result, dict) else None
+        except ValueError as exc:
+            raise BriefError("Unsupported source URL identity") from exc
+        _require(isinstance(result, dict) and set(result) - {"grant_receipt_sha256"} == {"schema_version", "request_id", "operation_id", "url",
+                     "input_sha256", "status", "dispatch_started", "source_requests", "elapsed_seconds", "reserved_seconds",
+                     "observation_sha256", "grant_command_id", "grant_receipt_ts"}
+                 and result.get("schema_version") == "source_not_dispatched_v1"
+                 and result.get("request_id") == expected_request and result.get("operation_id") == operation_id
+                 and artifact_input == expected_input and result.get("input_sha256") == expected_input
+                 and result.get("status") == "not_dispatched" and result.get("dispatch_started") is False
+                 and type(result.get("source_requests")) is int and result["source_requests"] == 0
+                 and result.get("elapsed_seconds") is None and type(result.get("reserved_seconds")) in (int, float)
+                 and result.get("reserved_seconds") == attempt["reserved_seconds"],
+                 "Not-dispatched evidence binding mismatch")
+        sha = result.get("observation_sha256")
+        _require(isinstance(sha, str) and re.fullmatch(r"[a-f0-9]{64}", sha), "Not-dispatched observation fingerprint required")
+        observation = artifact(sha)
+        _require(isinstance(observation, dict)
+                 and observation.get("artifact_kind") == "local_dispatch_observation_not_settlement"
+                 and observation.get("status") == "not_dispatched_grant_expired"
+                 and observation.get("request_id") == expected_request
+                 and isinstance(observation.get("operation_ids"), list) and operation_id in observation["operation_ids"]
+                 and observation.get("dispatch_started") is False
+                 and type(observation.get("source_requests")) is int and observation["source_requests"] == 0
+                 and observation.get("command_id") == result.get("grant_command_id")
+                 and observation.get("receipt_ts") == result.get("grant_receipt_ts"),
+                 "Not-dispatched observation binding mismatch")
+        # 观察可覆盖比本次证据选择更大的批次，不强制补入无关来源。
+        # 全轮预算完整性由许可时的宿主机权威账本独立核对。
+        ids = observation["operation_ids"]
+        _require(all(isinstance(op, str) for op in ids) and len(ids) == len(set(ids)),
+                 "Not-dispatched observation operation IDs must be unique")
+        receipt = result.get("grant_receipt_ts")
+        _require(isinstance(receipt, str) and re.fullmatch(r"[0-9]{10}\.[0-9]{6}", receipt)
+                 and isinstance(result.get("grant_command_id"), str)
+                 and re.fullmatch(r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}", result["grant_command_id"]),
+                 "Not-dispatched grant identity required")
+        deadline = float(receipt) + 60
+        if "grant_receipt_sha256" in result:
+            grant_sha = result["grant_receipt_sha256"]
+            _require(isinstance(grant_sha, str) and re.fullmatch(r"[a-f0-9]{64}", grant_sha),
+                     "Not-dispatched grant receipt fingerprint required")
+            raw = read(f"stage_artifacts/{grant_sha}.json", MAX_PACKAGE_BYTES)
+            prefix = b"!ai-research control-receipt "
+            _require(hashlib.sha256(raw).hexdigest() == grant_sha and raw.startswith(prefix),
+                     "Not-dispatched grant receipt fingerprint or prefix mismatch")
+            grant = _json(raw[len(prefix):], "original grant receipt")
+            _require(isinstance(grant, dict) and grant.get("request_id") == expected_request
+                     and grant.get("command_id") == result["grant_command_id"]
+                     and grant.get("dispatch_granted") is True
+                     and not grant.get("replayed") and not grant.get("grant_expired")
+                     and isinstance(grant.get("operations"), list)
+                     and any(isinstance(op, dict) and op.get("operation_id") == operation_id
+                             and op.get("input_sha256") == expected_input for op in grant["operations"])
+                     and isinstance(grant.get("run"), dict), "Not-dispatched grant receipt binding mismatch")
+            lease = grant["run"].get("lease_until")
+            _require(type(lease) in (int, float) and 0 < lease < 10**16,
+                     "Not-dispatched original grant lease required")
+            deadline = min(deadline, lease / 1000)
+        timestamp_not_before(observation.get("observed_at"), observation.get("observed_at"))
+        observed = _time(observation.get("observed_at"))
+        _require(timestamp_not_before(observation["observed_at"], metadata["started_at"], False)
+                 and timestamp_not_before(metadata["finished_at"], observation["observed_at"], False)
+                 and observed.timestamp() >= max(deadline, float(receipt)),
+                 "Not-dispatched observation must follow grant expiry")
+        # 此处只校验留存字节，不代表宿主机授权。
+        # 原始发布服务会独立将许可绑定至权威账本。
+        cancelled_observations[operation_id] = observation["observed_at"]
+        return observation["observed_at"]
+
+    def source_observation_order(record, prior=None):
+        _require(record["retrieved_at"] is not None or community.only_undispatched_attempts(record),
+                 "Executed source requires a retrieval timestamp")
+        _require(not community.only_undispatched_attempts(record) or record["retrieved_at"] is None,
+                 "Undispatched source cannot claim a retrieval timestamp")
+        attempts = record["attempt_records"]
+        last_observation = None
+        for number, attempt in enumerate(attempts):
+            if attempt["status"] != "not_dispatched":
+                continue
+            observed = cancelled_observations[attempt["operation_id"]]
+            if prior is not None and number >= len(prior["attempt_records"]) and not community.only_undispatched_attempts(prior):
+                _require(prior["retrieved_at"] is not None and timestamp_not_before(observed, prior["retrieved_at"]),
+                         "Appended cancellation must follow the original retained read")
+            if last_observation is not None:
+                _require(timestamp_not_before(observed, last_observation), "No-dispatch observations must preserve attempt order")
+            last_observation = observed
+            if any(a["status"] != "not_dispatched" for a in attempts[number+1:]):
+                _require(record["retrieved_at"] is not None and timestamp_not_before(record["retrieved_at"], observed),
+                         "Source retry retrieval must follow its no-dispatch observation")
+            elif any(a["status"] != "not_dispatched" for a in attempts[:number]):
+                _require(record["retrieved_at"] is not None and timestamp_not_before(observed, record["retrieved_at"]),
+                         "Trailing no-dispatch observation must follow the retained read")
+
+    continuation_source_bindings = ({}, {})
+
     def operation_budget(record, kind, index):
         # 缺计时不等于零耗时，也不豁免真实尝试次数或已知的超限。
         if not layered_budget and record["attempts"] > limits[f"{kind}_attempts"]:
@@ -344,15 +474,26 @@ def _validate_audit(directory):
             _require(elapsed <= run_elapsed + (LAYERED_TIME_TOLERANCE if layered_budget else 0), f"{label} duration exceeds recorded run interval")
             if not layered_budget and elapsed > limits["operation_seconds"]:
                 blockers.append(f"{kind}_budget_exceeded")
+        _require(layered_budget or not any("prepublication_continuation_sha256" in a for a in record.get("attempt_records", [])),
+                 "Model continuation requires the original layered budget")
         if layered_budget:
             attempts = record["attempt_records"]
             _require(len(attempts) == record["attempts"], "Attempt count does not match retained records")
             _require(attempts[-1]["status"] == record["status"], "Final attempt status mismatch")
             known = 0
             charged_attempts = {}
+            charged_seconds_by_round = {}
             cap = limits["source_attempt_seconds" if kind == "source" else "model_stage_seconds"]
             for number, attempt in enumerate(attempts):
                 duration = attempt["elapsed_seconds"]
+                has_continuation = "prepublication_continuation_sha256" in attempt
+                _require(not has_continuation or (kind == "model" and number > 0
+                         and "page_round" not in attempt), "Model continuation requires a preceding attempt before first publication")
+                not_dispatched = attempt["status"] == "not_dispatched"
+                if not_dispatched:
+                    _require(kind == "source" and duration is None, "Only sources may retain an undispatched reservation")
+                    observed = retained_not_dispatched(attempt, record)
+                    warnings.append({"code": "not_dispatched_reservation_retained", "path": f"sources[{index}].attempt_records[{number}]"})
                 _require(attempt["reserved_seconds"] <= cap, "Attempt reservation exceeds original kind limit")
                 _require(not attempt["error"] if attempt["status"] == "ok" else bool(attempt["error"].strip()),
                          "Attempt outcome needs a consistent error")
@@ -370,7 +511,7 @@ def _validate_audit(directory):
                     accounting["unknown_attempts"][kind] += 1
                     accounting["reserved_unknown_seconds"] += max(attempt["reserved_seconds"], duration or 0)
                     charged_attempts[round_id] = charged_attempts.get(round_id, 0) + 1
-                    if attempt["status"] == "unknown":
+                    if attempt["status"] == "unknown" or (has_continuation and duration is None):
                         blockers.append("operation_outcome_unknown")
                 elif successful:
                     accounting["successful_attempts"][kind] += 1
@@ -381,17 +522,23 @@ def _validate_audit(directory):
                 else:
                     accounting["failed_attempts"][kind] += 1
                     accounting["failed_seconds"] += duration
+                if successful or duration is None or attempt["status"] == "unknown":
+                    charged_seconds_by_round[round_id] = charged_seconds_by_round.get(round_id, 0) + (
+                        max(attempt["reserved_seconds"], duration or 0) if duration is None or attempt["status"] == "unknown" else duration)
                 if number:
                     previous = attempts[number - 1]
+                    continuation = has_continuation and validate_continuation(
+                        metadata, record, attempt, previous, read, _require, _json, continuation_source_bindings)
                     preceding_round = previous.get("page_round", {}).get("revision", 1)
                     new_round = kind == "model" and previous_metadata is not None and round_id > preceding_round
                     known_source_read = kind == "source" and previous["status"] == "ok"
-                    _require(known_source_read or previous["status"] in {"failed", "timeout"} or
+                    _require(continuation or known_source_read or previous["status"] in {"failed", "timeout"} or
+                             (kind == "source" and previous["status"] == "not_dispatched") or
                              (new_round and previous["status"] in {"ok", "partial"}),
                              "Cannot retry an already completed or unknown attempt")
                     _require(round_id == preceding_round or (new_round and round_id <= current_revision),
                              "Page rounds must advance within authenticated publication revisions")
-                    _require(previous["elapsed_seconds"] is not None, "Unknown attempt cannot be replayed")
+                    _require(previous["elapsed_seconds"] is not None or (kind == "source" and previous["status"] == "not_dispatched"), "Unknown attempt cannot be replayed")
                 if kind == "model":
                     _require(not successful or attempt["result_sha256"] is not None, "Successful model attempt requires its saved result")
                     for field in ("input_sha256", "checkpoint_sha256", "result_sha256"):
@@ -411,6 +558,8 @@ def _validate_audit(directory):
                 _require(elapsed + LAYERED_TIME_TOLERANCE >= known, "Cumulative duration is less than retained attempts")
                 if kind == "model":
                     _require(abs(elapsed - known) <= LAYERED_TIME_TOLERANCE, "Model cumulative duration must equal retained attempt durations")
+            if kind == "model" and any(seconds > cap + LAYERED_TIME_TOLERANCE for seconds in charged_seconds_by_round.values()):
+                blockers.append("model_budget_exceeded")
             if any(count > limits[f"{kind}_attempts"] for count in charged_attempts.values()):
                 blockers.append(f"{kind}_budget_exceeded")
 
@@ -420,13 +569,29 @@ def _validate_audit(directory):
         _require(identity not in sources, "Duplicate source ID")
         sources[identity] = source
         _url(source["url"])
-        retrieved = _time(source["retrieved_at"])
-        _require(started <= retrieved <= finished, "Source read time is outside this run")
-        if source["published_at"] is not None:
-            _require(_time(source["published_at"]) <= retrieved, "Source publication follows retrieval")
+        unread = community.only_undispatched_attempts(source)
+        _require(source["retrieved_at"] is not None or unread, "Executed source requires a retrieval timestamp")
+        retrieved = _time(source["retrieved_at"]) if source["retrieved_at"] is not None else None
+        if retrieved is not None:
+            _require(started <= retrieved <= finished, "Source read time is outside this run")
+            if source["published_at"] is not None:
+                _require(_time(source["published_at"]) <= retrieved, "Source publication follows retrieval")
+        _require(not unread or source["retrieved_at"] is None, "Undispatched source cannot claim a retrieval timestamp")
         operation_budget(source, "source", index)
-        if source["status"] == "ok":
-            _require(source["content_sha256"] is not None and not source["error"], "Successful source needs content fingerprint and no error")
+        if layered_budget:
+            source_observation_order(source)
+        if previous_metadata is not None:
+            old = next((item for item in previous_metadata["sources"] if item["id"] == identity), None)
+            if old is not None and any(a["status"] == "not_dispatched" for a in source["attempt_records"]) and any(
+                    a["status"] != "not_dispatched" for a in source["attempt_records"][len(old["attempt_records"]):]):
+                _require(timestamp_not_before(source["retrieved_at"], previous_metadata["finished_at"]),
+                         "Resumed source read must follow the previous audit finish")
+        if community.only_undispatched_attempts(source):
+            _require(source["content_sha256"] is None, "Undispatched source cannot retain response bytes")
+        if community.executed_source_status(source) == "ok":
+            _require(source["content_sha256"] is not None and not community.executed_source_outcome(source)[1]
+                     and (not source["error"] if source["status"] == "ok" else bool(source["error"].strip())),
+                     "Successful source needs content fingerprint and no error")
         else:
             _require((complete_contract or source["content_sha256"] is None) and bool(source["error"].strip()),
                      "Failed source needs an error, not a successful content fingerprint")
@@ -438,8 +603,25 @@ def _validate_audit(directory):
                 source_text[identity] = content.decode("utf-8")
             except UnicodeError as exc:
                 raise BriefError("Evidence must be the actual UTF-8 text read from the source") from exc
-            if source["status"] == "ok":
+            if community.executed_source_status(source) == "ok":
                 _require(bool(source_text[identity].strip()), "Successful source evidence is empty")
+
+    if previous_metadata is not None:
+        for prior in previous_metadata["sources"]:
+            if any(a["status"] == "not_dispatched" for a in sources[prior["id"]]["attempt_records"]):
+                source_observation_order(prior)
+                source_observation_order(sources[prior["id"]], prior)
+                _require(all(timestamp_not_before(previous_metadata["finished_at"], cancelled_observations[a["operation_id"]], False)
+                             for a in prior["attempt_records"] if a["status"] == "not_dispatched"),
+                         "Previous audit cannot finish before its retained no-dispatch observations")
+
+    if previous_metadata is not None:
+        previous_sources = {s["id"]: s for s in previous_metadata["sources"]}
+        for source in sources.values():
+            retained_count = len(previous_sources.get(source["id"], {}).get("attempt_records", []))
+            _require(all(timestamp_not_before(cancelled_observations[a["operation_id"]], previous_metadata["finished_at"], False)
+                         for a in source["attempt_records"][retained_count:] if a["status"] == "not_dispatched"),
+                     "Appended cancellation must follow the previous audit finish")
 
     def references(ids):
         _require(len(ids) == len(set(ids)) and all(i in sources for i in ids), "Source references must be unique and known")
@@ -456,7 +638,7 @@ def _validate_audit(directory):
         linked = references(check["source_ids"])
         matching = linked if name in discovery_refs else [s for s in linked if source_matches(name, s["url"])] if complete_contract else linked
         if check["status"] in {"checked", "no_qualifying_items"}:
-            _require(any(s["status"] == "ok" and (not complete_contract or s["attempts"] > 0) for s in matching),
+            _require(any(community.executed_source_status(s) == "ok" and (not complete_contract or s["attempts"] > 0) for s in matching),
                      "Completed coverage needs a successful source read from its required source group")
             if complete_contract:
                 _require("failure_kind" not in check, "Completed coverage cannot claim a source failure")
@@ -470,13 +652,14 @@ def _validate_audit(directory):
                 blockers.append("required_coverage_not_checked")
         else:
             if complete_contract:
-                _require(check.get("failure_kind") in FAILURE_KINDS and matching and all(s["attempts"] > 0 for s in matching),
+                _require(check.get("failure_kind") in FAILURE_KINDS and matching and all(s["attempts"] > 0 for s in matching)
+                         and any(not community.only_undispatched_attempts(s) for s in matching),
                          "Failed coverage requires an attempted matching source and explicit failure kind")
                 if check["failure_kind"] in {"transport", "access_denied"}:
                     statuses = {"failed", "timeout"} if check["failure_kind"] == "transport" else {"failed"}
-                    _require(any(s["status"] in statuses for s in matching), "Access failure needs a failed source record")
+                    _require(any(community.executed_source_status(s) in statuses for s in matching), "Access failure needs a failed source record")
                 elif check["failure_kind"] == "unusable_response":
-                    _require(any(s["status"] == "failed" and s["content_sha256"] is not None for s in matching),
+                    _require(any(community.executed_source_status(s) == "failed" and s["content_sha256"] is not None for s in matching),
                              "Unusable response needs retained failed-source bytes")
                 else:
                     _require(any(s["content_sha256"] is not None for s in matching), "Unusable or incomplete response needs retained source bytes")
@@ -548,13 +731,22 @@ def _validate_audit(directory):
                          and prior.get("status") == records[-1].get("status")
                          and current["attempt_records"][:len(records)] == records,
                          "Coverage resolution must retain all original source attempts")
+                _require(community.cancelled_suffix_preserves_response(current, prior),
+                         "Undispatched suffix must preserve original source response metadata")
                 _require(len(current["attempt_records"]) > len(records) or current == prior,
                          "Changed retained sources require an appended budgeted attempt")
                 _require(prior["elapsed_seconds"] is None or current["elapsed_seconds"] is None or
                          current["elapsed_seconds"] + LAYERED_TIME_TOLERANCE >= prior["elapsed_seconds"],
                          "Coverage resolution must preserve recorded cumulative source time")
+                source_observation_order(prior)
+                source_observation_order(current, prior)
+                _require(not community.only_undispatched_attempts(prior) or prior["retrieved_at"] is None,
+                         "Undispatched source cannot claim a retrieval timestamp")
                 prior_hash = prior.get("content_sha256")
-                _require(prior.get("status") != "ok" or (prior_hash is not None and not prior["error"]),
+                _require(not community.only_undispatched_attempts(prior) or prior_hash is None,
+                         "Undispatched source cannot retain response bytes")
+                _require(community.executed_source_status(prior) != "ok" or (prior_hash is not None and not community.executed_source_outcome(prior)[1]
+                         and (not prior["error"] if prior["status"] == "ok" else bool(prior["error"].strip()))),
                          "Original successful source needs retained response bytes")
                 if prior_hash is not None:
                     _require(isinstance(prior_hash, str) and re.fullmatch(r"[a-f0-9]{64}", prior_hash),
@@ -567,7 +759,7 @@ def _validate_audit(directory):
                         retained_source_text[prior["id"]] = prior_bytes.decode("utf-8")
                     except UnicodeError as exc:
                         raise BriefError("Original source response must be UTF-8") from exc
-                    _require(prior["status"] != "ok" or bool(retained_source_text[prior["id"]].strip()),
+                    _require(community.executed_source_status(prior) != "ok" or bool(retained_source_text[prior["id"]].strip()),
                              "Original successful source evidence is empty")
                 retained_sources[prior["id"]] = prior
             if discovery_contract:
@@ -596,24 +788,26 @@ def _validate_audit(directory):
                          "Original coverage requires retained source references")
                 matching = [prior_by_id[i] for i in ids if (discovery_contract and name in community.CHECKS) or source_matches(name, prior_by_id[i]["url"])]
                 if check["status"] != "failed":
-                    _require(any(s["status"] == "ok" for s in matching), "Original completed coverage needs successful evidence")
+                    _require(any(community.executed_source_status(s) == "ok" for s in matching), "Original completed coverage needs successful evidence")
                     continue
                 kind = check.get("failure_kind")
-                _require(isinstance(kind, str) and kind in FAILURE_KINDS and matching,
+                _require(isinstance(kind, str) and kind in FAILURE_KINDS and matching
+                         and any(not community.only_undispatched_attempts(s) for s in matching),
                          "Original failed coverage needs an explicit failure kind and matching source")
                 if kind in {"transport", "access_denied"}:
                     statuses = {"failed", "timeout"} if kind == "transport" else {"failed"}
-                    _require(any(s["status"] in statuses for s in matching), "Original access failure needs failed-source evidence")
+                    _require(any(community.executed_source_status(s) in statuses for s in matching), "Original access failure needs failed-source evidence")
                 elif kind == "unusable_response":
-                    _require(any(s["status"] == "failed" and s.get("content_sha256") is not None for s in matching),
+                    _require(any(community.executed_source_status(s) == "failed" and s.get("content_sha256") is not None for s in matching),
                              "Original unusable response needs retained failed-source bytes")
                 else:
                     _require(any(s.get("content_sha256") is not None for s in matching),
                              "Original incomplete listing needs retained source bytes")
             resolved = references(resolution["source_ids"])
-            _require(all(source["id"] not in prior_by_id or len(source["attempt_records"]) >
-                         len(prior_by_id[source["id"]]["attempt_records"]) for source in resolved),
-                     "Reused resolution sources require an appended budgeted attempt")
+            _require(all(any(a["status"] == "ok" for a in source["attempt_records"][
+                         len(prior_by_id[source["id"]]["attempt_records"]) if source["id"] in prior_by_id else 0:])
+                         for source in resolved),
+                     "Reused resolution sources require an appended budgeted attempt with a successful read")
             _require(isinstance(original.get("started_at"), str) and isinstance(original.get("finished_at"), str),
                      "Original research timestamps are required")
             research_started, research_finished = _time(original["started_at"]), _time(original["finished_at"])
@@ -621,11 +815,15 @@ def _validate_audit(directory):
                      and (attempt["elapsed_seconds"] is None or
                           abs((research_finished - research_started).total_seconds() - attempt["elapsed_seconds"]) <= LAYERED_TIME_TOLERANCE),
                      "Original research timing must match its audited run and duration")
-            _require(all(started <= _time(prior["retrieved_at"]) <= research_finished
+            _require(all((community.only_undispatched_attempts(prior) and prior["retrieved_at"] is None)
+                         or (prior["retrieved_at"] is not None and started <= _time(prior["retrieved_at"]) <= research_finished
                          and (prior["published_at"] is None or
-                              _time(prior["published_at"]) <= _time(prior["retrieved_at"])) for prior in prior_sources),
+                              _time(prior["published_at"]) <= _time(prior["retrieved_at"]))) for prior in prior_sources),
                      "Original research cannot finish before its retained sources")
-            _require(all(source["status"] == "ok" and _time(source["retrieved_at"]) > research_finished for source in resolved),
+            _require(all(timestamp_not_before(original["finished_at"], cancelled_observations[a["operation_id"]], False)
+                         for prior in prior_sources for a in prior["attempt_records"] if a["status"] == "not_dispatched"),
+                     "Original research cannot finish before its retained no-dispatch observations")
+            _require(all(community.executed_source_status(source) == "ok" and _time(source["retrieved_at"]) > research_finished for source in resolved),
                      "Coverage resolution needs successful evidence retrieved after the original result")
             for name in prior_gaps:
                 _require(any(source["id"] in metadata["checks"][name]["source_ids"]
@@ -644,6 +842,7 @@ def _validate_audit(directory):
     if set(calls) != {"research", "editor"}:
         blockers.append("model_stage_missing")
 
+    validate_current_outputs(metadata, candidates, read, _require, _json)
     by_event = {}
     for candidate in candidates["items"]:
         key = candidate["event_key"]
@@ -662,7 +861,7 @@ def _validate_audit(directory):
                         for s in linked if s["id"] in retained_sources)
         candidate_versions = [(retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
                               for s in linked if s["id"] in retained_sources] if retained_sources else versions
-        matching = [(s, text) for s, text in candidate_versions if s["status"] == "ok" and s["url"] == candidate["source_url"]
+        matching = [(s, text) for s, text in candidate_versions if community.executed_source_status(s) == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
                     and _time(s["retrieved_at"]) == _time(candidate["retrieved_at"])]
@@ -679,7 +878,7 @@ def _validate_audit(directory):
             _require(candidate["source_type"] == "primary", "Selected candidates require primary source evidence")
             age = (as_of - _time(candidate["published_at"])).total_seconds()
             _require(0 <= age <= metadata["window_hours"] * 3600, "Selected candidate is outside the research window")
-            _require(all(any(version["id"] == s["id"] and version["status"] == "ok"
+            _require(all(any(version["id"] == s["id"] and community.executed_source_status(version) == "ok"
                              for version, _ in versions) for s in linked),
                      "Selected evidence contains a failed source")
     _require(set(decisions) == set(by_event), "Every candidate needs a selection or exclusion decision")
@@ -720,7 +919,7 @@ def _validate_audit(directory):
         _require(key not in by_event and key not in status_entries and key not in history_events,
                  "Coverage status must be distinct from candidates and historical events")
         linked = references(entry["source_ids"])
-        _require(linked and all(source["status"] == "ok" for source in linked),
+        _require(linked and all(community.executed_source_status(source) == "ok" for source in linked),
                  "Coverage status requires successful source evidence")
         status_entries[key] = entry
     draft_sha = metadata["inputs"]["draft_sha256"]

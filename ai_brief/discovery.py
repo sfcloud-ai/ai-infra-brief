@@ -5,6 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import timedelta
 from urllib.parse import parse_qs, urlsplit, unquote
+from .coverage import REQUIRED_CHECKS, source_matches
 
 CONTRACT = "daily_required_v2"
 PROMPT_MARKER = "Coverage-Contract: daily_required_v2"
@@ -15,25 +16,61 @@ PAGE_CHECKS = {
 }
 
 
+def only_undispatched_attempts(source):
+    """区分保留许可与实际来源请求，供当前和历史证据共用。"""
+    attempts = source.get("attempt_records", [])
+    return bool(attempts) and all(a["status"] == "not_dispatched" for a in attempts)
+
+
+def executed_source_outcome(source):
+    """预留但未发起的重试不能抹去最近一次实际请求结果。"""
+    for attempt in reversed(source.get("attempt_records", [])):
+        if attempt["status"] != "not_dispatched":
+            return attempt["status"], attempt["error"]
+    return (None, source["error"]) if only_undispatched_attempts(source) else (source["status"], source["error"])
+
+
+def executed_source_status(source):
+    """统一当前和历史来源的实际结果判定。"""
+    return executed_source_outcome(source)[0]
+
+
+def cancelled_suffix_preserves_response(current, previous):
+    """仅追加未派发预留时，除原始状态和预算汇总外不得改变来源事实。"""
+    suffix = current["attempt_records"][len(previous["attempt_records"]):]
+    if not suffix or any(a["status"] != "not_dispatched" for a in suffix):
+        return True
+    accounting = {"attempts", "attempt_records", "elapsed_seconds", "timing_unavailable_reason", "status", "error"}
+    return ({k: v for k, v in current.items() if k not in accounting}
+            == {k: v for k, v in previous.items() if k not in accounting})
+
+
 def successor_sources_preserved(current, previous):
     """仅未完成的发现检查可以为原来源追加尝试。"""
     old_sources, new_sources = previous["sources"], current["sources"]
     if len(new_sources) < len(old_sources):
         return False
-    retryable = {q["source_id"] for q in previous["discovery"]["queries"]
+    retryable = {q["source_id"] for q in previous.get("discovery", {}).get("queries", [])
                  if previous["checks"][q["family"]]["status"] == "failed"}
     protected = {s for name, check in previous["checks"].items()
                  if name not in CHECKS or check["status"] != "failed" for s in check["source_ids"]}
+    cancelled = {s["id"] for s in old_sources if only_undispatched_attempts(s)}
+    checked_refs = {identity for check in previous["checks"].values()
+                    if check["status"] in {"checked", "no_qualifying_items"} for identity in check["source_ids"]}
+    retryable = (retryable - protected) | (cancelled - checked_refs)
     mutable = {"attempts", "attempt_records", "elapsed_seconds", "timing_unavailable_reason",
                "status", "error", "content_sha256", "retrieved_at"}
     for old, new in zip(old_sources, new_sources):
         if old == new:
             continue
-        if old["id"] not in retryable - protected:
-            return False
-        if {k: v for k, v in old.items() if k not in mutable} != {k: v for k, v in new.items() if k not in mutable}:
+        if old["id"] not in retryable or not cancelled_suffix_preserves_response(new, old):
             return False
         before, after = old["attempt_records"], new["attempt_records"]
+        fields = mutable
+        if only_undispatched_attempts(old) and old["published_at"] is None and any(a["status"] == "ok" for a in after[len(before):]):
+            fields = mutable | {"published_at"}
+        if {k: v for k, v in old.items() if k not in fields} != {k: v for k, v in new.items() if k not in fields}:
+            return False
         if len(after) <= len(before) or after[:len(before)] != before or new["attempts"] != len(after):
             return False
         if old["elapsed_seconds"] is not None and new["elapsed_seconds"] is not None and new["elapsed_seconds"] < old["elapsed_seconds"]:
@@ -116,6 +153,8 @@ def validate_discovery(metadata, sources, texts, candidates, history, require, t
     """验证发现读取；历史前缀只由调用者已核验的上轮审计提供。"""
     discovery = metadata["discovery"]
     prior_queries = previous["discovery"]["queries"] if previous is not None else []
+    prior_attempts = {source["id"]: len(source["attempt_records"])
+                      for source in previous["sources"]} if previous is not None else {}
     require(discovery["queries"][:len(prior_queries)] == prior_queries,
             "Discovery must preserve the authenticated previous query prefix")
     by_event = {c["event_key"]: c for c in candidates["items"]}
@@ -123,6 +162,28 @@ def validate_discovery(metadata, sources, texts, candidates, history, require, t
     refs = {name: [] for name in CHECKS}
     ids, broad_queries = set(), {}
     operations, source_urls = set(), {}
+    # 固定来源用途由原有覆盖检查和来源匹配共同确认，不依赖可被删去的查询行。
+    fixed_sources = {identity for name in REQUIRED_CHECKS
+                     for identity in metadata["checks"].get(name, {}).get("source_ids", [])
+                     if identity in sources and source_matches(name, sources[identity]["url"])}
+    cancelled_search_sources = set()
+    for identity, source in sources.items():
+        if not any(a["status"] == "not_dispatched" for a in source["attempt_records"]):
+            continue
+        parsed = urlsplit(source["url"])
+        params = parse_qs(parsed.query)
+        bounded = {str(value) for value in range(1, 21)}
+        recognized = ((parsed.hostname == "api.github.com" and parsed.path in {"/search/repositories", "/search/issues"}
+                       and len(params.get("per_page", [])) == 1 and params["per_page"][0] in bounded)
+                      or (parsed.hostname == "www.bing.com" and parsed.path == "/search" and params.get("format") == ["rss"]
+                          and len(params.get("count", [])) == 1 and params["count"][0] in bounded))
+        query_values = params.get("q", [])
+        if recognized and len(query_values) == 1:
+            value = unquote(query_values[0]).casefold().replace('"', '').replace("'", "")
+            fixed = re.search(r"(?:^|\s)[+-]?(?:repo|org|user|owner):|(?:github\.com|githubusercontent\.com)/[\w.-]", value)
+            github_scope = parsed.hostname == "api.github.com" or re.search(r"(?:^|\s)site:github\.com(?:\s|$)", value)
+            if github_scope and (not fixed or identity not in fixed_sources):
+                cancelled_search_sources.add(identity)
     complete_queries = set()
     modes = {mode: [] for mode in ("current", "backscan", "followup")}
     as_of = time(metadata["as_of"])
@@ -165,7 +226,10 @@ def validate_discovery(metadata, sources, texts, candidates, history, require, t
         operations.add(operation)
         attempt = source["attempt_records"][query["attempt"] - 1]
         fingerprint = query["response_sha256"]
-        if query["attempt"] == len(source["attempt_records"]):
+        require(attempt["status"] != "not_dispatched" or fingerprint is None,
+                "Undispatched discovery cannot retain response bytes")
+        if attempt["status"] != "not_dispatched" and all(a["status"] == "not_dispatched"
+                for a in source["attempt_records"][query["attempt"]:]):
             require(fingerprint == source["content_sha256"], "Discovery response must bind its actual final attempt")
         require(attempt["status"] != "ok" or fingerprint is not None, "Successful discovery needs original response bytes")
         text = ""
@@ -200,32 +264,42 @@ def validate_discovery(metadata, sources, texts, candidates, history, require, t
                 require(key is not None and repo is not None and result["novelty"] in {"new_event", "new_evidence"},
                         "Old or unverified discovery cannot become today's news")
                 linked = [sources[s] for s in result["source_ids"]]
-                require(any(s["status"] == "ok" and project_source(repo, s["url"]) for s in linked)
+                require(any(executed_source_status(s) == "ok" and project_source(repo, s["url"]) for s in linked)
                         and (retained or any(s["url"] == by_event[key]["source_url"] for s in linked)),
                         "Selected discovery needs project primary evidence and the candidate source")
                 if not retained:
                     require(set(result["source_ids"]) <= set(decisions[key]["source_ids"]), "Discovery evidence must bind the selection audit")
                 if result["novelty"] == "new_evidence":
-                    require(result["baseline_url"] is not None and any(s["status"] == "ok" and s["url"] == result["baseline_url"] for s in linked),
+                    require(result["baseline_url"] is not None and any(executed_source_status(s) == "ok" and s["url"] == result["baseline_url"] for s in linked),
                             "New evidence needs the retained previous baseline")
             if result["novelty"] == "old_discovery":
                 require(result["disposition"] not in {"selected", "update"}, "Old discovery is a lead, not a new event")
             if result["disposition"] == "watch":
                 require(repo is not None and result["next_step"].strip(), "Watch candidates need a project and a concrete followup")
-    for identity in source_urls.values():
+    for identity in set(source_urls.values()) | cancelled_search_sources:
+        cancelled = any(a["status"] == "not_dispatched" for a in sources[identity]["attempt_records"])
         require(all((identity, number) in operations for number, attempt in
-                    enumerate(sources[identity]["attempt_records"], 1) if attempt["status"] == "ok"),
+                    enumerate(sources[identity]["attempt_records"], 1)
+                    if attempt["status"] == "ok" or (cancelled and number > prior_attempts.get(identity, 0))),
+                "Every retained discovery attempt needs its original query and response" if cancelled else
                 "Every successful discovery attempt needs its original query and response")
-    require(len(modes["backscan"]) <= 2 and len(modes["followup"]) <= 2, "Auxiliary discovery must remain bounded")
     for mode in ("backscan", "followup"):
         note = discovery[mode]
-        require((note["status"] == "performed") == bool(modes[mode]), "Discovery auxiliary work must match its actual queries")
+        executed = [q for q in modes[mode] if sources[q["source_id"]]["attempt_records"][q["attempt"] - 1]["status"] != "not_dispatched"]
+        require(len(executed) <= 2, "Auxiliary discovery must remain bounded")
+        require((note["status"] == "performed") == bool(executed), "Discovery auxiliary work must match its actual queries")
     for name, source_ids in refs.items():
         require(len(source_ids) == len(set(source_ids)), "Discovery current queries must retain distinct operations")
         check = metadata["checks"][name]
         require(set(check["source_ids"]) == set(source_ids), "Discovery check must bind its current-window queries")
         if check["status"] == "not_checked":
-            require(not source_ids, "Executed discovery cannot be labeled not checked")
+            require(all(sources[q["source_id"]]["attempt_records"][q["attempt"] - 1]["status"] == "not_dispatched"
+                        for q in modes["current"] if q["family"] == name),
+                    "Executed discovery cannot be labeled not checked")
+        if check["status"] == "failed":
+            require(any(sources[q["source_id"]]["attempt_records"][q["attempt"] - 1]["status"] != "not_dispatched"
+                        for q in modes["current"] if q["family"] == name),
+                    "Failed discovery requires an executed current query")
         if check["status"] in {"checked", "no_qualifying_items"}:
             require(any(q["id"] in complete_queries for q in modes["current"] if q["family"] == name),
                     "Completed discovery needs a successful source read with complete bounded search results")
