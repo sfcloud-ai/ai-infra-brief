@@ -369,3 +369,71 @@ class CommunityDiscoveryTests(unittest.TestCase):
                 self.assertEqual('source_budget_exceeded' in self.check()['blockers'], incomplete)
                 retry['attempt'] = 1
                 self.reject('distinct retained source attempt')
+
+    def retained_detail_resolution(self):
+        q = self.audit['discovery']['queries'][0]
+        self.fail_query(q, True)
+        output = {key: deepcopy(self.audit[key]) for key in ('checks', 'sources', 'discovery')}
+        output['candidates'] = deepcopy(self.candidates)
+        for check in output['checks'].values():
+            check['detail'] = check.pop('reason')
+        call = self.audit['model_calls'][0]
+        call.update(status='partial', partial_reason='coverage_incomplete', error='Original discovery gap',
+                    coverage_resolution={'source_ids': [q['source_id']]})
+        call['attempt_records'][0].update(status='partial', error=call['error'])
+        original = dict(stage='research', stage_status='partial', partial_reason='coverage_incomplete',
+                        error=call['error'], started_at='2026-11-06T07:22:40+08:00',
+                        finished_at='2026-11-06T07:23:00+08:00', elapsed_seconds=call['elapsed_seconds'],
+                        input_sha256=call['attempt_records'][0]['input_sha256'])
+        self.retry_query(q)
+        return output, original, call
+
+    def bind_retained_output(self, output, original, call):
+        original['output_sha256'] = self.artifact(json.dumps(output).encode())
+        call['attempt_records'][0]['result_sha256'] = self.artifact(json.dumps(original).encode())
+
+    def test_resolved_discovery_accepts_retained_detail_without_changing_original(self):
+        output, original, call = self.retained_detail_resolution()
+        self.bind_retained_output(output, original, call)
+        path = self.root / 'stage_artifacts' / (original['output_sha256'] + '.json')
+        before, model = path.read_bytes(), deepcopy(call)
+        self.assertEqual(self.check()['readiness'], 'ready')
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(call, model)
+        path.write_bytes(before + b' ')
+        self.reject('Research output fingerprint')
+
+    def test_retained_detail_does_not_relax_explanation_schema(self):
+        for replacement, message in [
+                ({'detail': 'one', 'reason': 'two'}, 'Ambiguous original coverage explanation'),
+                ({'detail': 'same', 'reason': 'same'}, 'Ambiguous original coverage explanation'),
+                ({}, 'Invalid original discovery schema'),
+                ({'detail': None}, 'Invalid original discovery schema'),
+                ({'detail': ''}, 'Invalid original discovery schema'),
+                ({'detail': 'x' * 10001}, 'Invalid original discovery schema'),
+                ({'detail': 'valid', 'extra': 'unknown'}, 'Invalid original discovery schema')]:
+            with self.subTest(replacement=replacement):
+                self.setUp()
+                output, original, call = self.retained_detail_resolution()
+                check = output['checks']['discovery_memory']
+                check.pop('detail')
+                check.update(replacement)
+                self.bind_retained_output(output, original, call)
+                self.reject(message)
+
+    def test_retained_detail_keeps_candidate_source_and_query_guards(self):
+        for changed in ('candidate', 'source', 'query'):
+            with self.subTest(changed=changed):
+                self.setUp()
+                output, original, call = self.retained_detail_resolution()
+                if changed == 'candidate':
+                    output['candidates']['items'][0]['summary'] = 'Different candidate'
+                    error = 'cannot introduce new research candidates'
+                elif changed == 'source':
+                    output['sources'][0]['url'] = 'https://example.com/changed'
+                    error = 'retain all original source attempts'
+                else:
+                    output['discovery']['queries'][0]['query'] += ' changed'
+                    error = 'query'
+                self.bind_retained_output(output, original, call)
+                self.reject(error)

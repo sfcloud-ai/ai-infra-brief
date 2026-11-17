@@ -573,7 +573,16 @@ def _validate_audit(directory):
             if discovery_contract:
                 prior_discovery = output.get("discovery")
                 _require(isinstance(prior_discovery, dict), "Original discovery record required for coverage resolution")
-                prior_metadata = dict(metadata, checks=prior_checks, discovery=prior_discovery, sources=prior_sources)
+                # 研究输出可用 detail 说明，正式审计则使用 reason。
+                # 上方已验证不可变原件的哈希，这里只规范化保留记录的副本。
+                prior_audit_checks = {}
+                for name, check in prior_checks.items():
+                    normalized = dict(check)
+                    if "detail" in normalized:
+                        _require("reason" not in normalized, "Ambiguous original coverage explanation")
+                        normalized["reason"] = normalized.pop("detail")
+                    prior_audit_checks[name] = normalized
+                prior_metadata = dict(metadata, checks=prior_audit_checks, discovery=prior_discovery, sources=prior_sources)
                 try:
                     validate("research-audit", prior_metadata)
                 except BriefError as exc:
