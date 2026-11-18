@@ -124,6 +124,8 @@ class RevisionDelivery:
             kind = "page_completion" if notice["kind"] == "page_completion" else "initial" if not started else "web_only" if effective["kind"] == "maintenance" else "revision_update"
             # 同一重要说明若已进入发送边界，后续版次不能借新 ID 重试未知结果。
             base = relay.validate_notice_connector(self.parent.config["notice_connector"])["report_base_url"]
+            if not started:
+                relay.notice_format.validate_first_notice(plan, base)
             text = plan["text"] if kind in {"initial", "page_completion"} else update_text(day, effective, base) if kind == "revision_update" else ""
             if kind == "revision_update" and any(phase in {"sending", "unknown"} and json.loads(encoded)["text"] == text for _, _, encoded, phase in revisions):
                 kind, text = "web_only", ""

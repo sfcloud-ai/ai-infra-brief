@@ -8,7 +8,7 @@ import unittest
 from urllib.parse import urlencode
 
 from ai_brief import discovery
-from ai_brief.contracts import RESOURCE_ROOT, parse_time
+from ai_brief.contracts import parse_time
 from tests import test_layered_budget as layered
 
 
@@ -21,7 +21,8 @@ class CommunityDiscoveryTests(unittest.TestCase):
     def setUp(self):
         layered.LayeredBudgetTests.setUp(self)
         self.audit['coverage_contract'] = discovery.CONTRACT
-        raw = (RESOURCE_ROOT / 'prompts/audit.md').read_bytes()
+        # 本组样例复现冻结的历史发现合同，整期六页由独立回归覆盖。
+        raw = discovery.PROMPT_MARKER.encode()
         self.root.joinpath('prompts/audit.md').write_bytes(raw)
         self.audit['inputs']['prompt_hashes']['audit.md'] = hashlib.sha256(raw).hexdigest()
         self.audit['discovery'] = {'queries': [], 'backscan': {'status': 'budget_deferred', 'reason': 'Synthetic bounded budget'},

@@ -426,6 +426,7 @@ class ScheduledDelivery:
                     or self.db.execute("SELECT 1 FROM requests WHERE id=?", (request_id,)).fetchone()
                     or self.db.execute("SELECT 1 FROM scheduled_notices WHERE report_date=?", (record["report_date"],)).fetchone()):
                 raise ScheduledDeliveryError("Existing report or attempt must be reconciled")
+            relay.notice_format.validate_first_notice(record, relay.validate_notice_connector(self.config["notice_connector"])["report_base_url"])
             self.db.execute("INSERT INTO scheduled_notices(request_id,report_date,record,bundle,poster,due,next_at) VALUES (?,?,?,?,?,?,?)", (request_id,record["report_date"],encoded,bundle,poster,due,due))
             self.db.execute("INSERT INTO requests(id,intent_hash,mode,actor_uid,created,status,parts_total) VALUES (?,?,?, ?,?,?,?)", (request_id,relay.digest(record),"scheduled",os.getuid(),self.clock(),"queued",len(pieces)+1))
             self.db.execute("INSERT INTO meta VALUES (?,?)", (edition, request_id))

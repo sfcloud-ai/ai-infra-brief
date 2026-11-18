@@ -1,8 +1,8 @@
 """有界的分项通知数据格式与固定来源发布清单读取。"""
 if __package__:
-    from .page_delivery import validate_pages, notice_text as page_notice_text
+    from .page_delivery import TOPICS, validate_pages, notice_text as page_notice_text
 else:
-    from page_delivery import validate_pages, notice_text as page_notice_text
+    from page_delivery import TOPICS, validate_pages, notice_text as page_notice_text
 
 from datetime import date
 from contextlib import contextmanager
@@ -153,6 +153,17 @@ def parse_article_text(text, base):
     require(article_text(day, revision or 1, articles, base, stable=stable) == text)
     return {"date": day, "revision": revision, "articles": articles,
             "index_url": f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"}
+
+
+def validate_first_notice(plan, base):
+    """从整期首发启用日开始，核对真正首次通知的日期及文章清单。"""
+    day = plan["report_date"]
+    if day < "2026-11-19":
+        return
+    notice = parse_article_text(plan["text"], base)
+    if (notice["date"] != day or notice["revision"] is not None
+            or notice["index_url"] != plan["notice_key"] or tuple(a["id"] for a in notice["articles"]) != TOPICS):
+        raise ValueError("first_notice_requires_all_six_articles")
 
 
 def match_manifest(candidate, manifest, base):

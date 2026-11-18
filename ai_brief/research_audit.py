@@ -23,6 +23,7 @@ from .research_continuation import validate_continuation, validate_current_outpu
 LAYERED_TIME_TOLERANCE = 1e-6
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
+WHOLE_EDITION_PACKAGE_BYTES = 32_000_000
 SELECTED = {"selected", "update"}
 PAGE_CHECKS = {
     "model-serving-gpu": ("model_serving",),
@@ -97,6 +98,7 @@ def _validate_audit(directory):
     """只读检查；通过不等于证实事实或允许公开私有材料。"""
     root = Path(directory).resolve(strict=True)
     total = 0
+    package_limit = MAX_PACKAGE_BYTES
     read_cache = {}
 
     def read(relative, max_bytes=MAX_FILE_BYTES):
@@ -109,11 +111,11 @@ def _validate_audit(directory):
         _require(not path.is_symlink() and not path.parent.is_symlink(), "Audit files must not be symlinks")
         _require(path.is_file(), f"Missing audit file: {relative}")
         _require(path.stat().st_size <= max_bytes, "Audit file exceeds size limit")
-        remaining = min(max_bytes, MAX_PACKAGE_BYTES - total)
+        remaining = min(max_bytes, package_limit - total)
         with path.open("rb") as stream:
             data = stream.read(remaining + 1)
         total += len(data)
-        _require(len(data) <= max_bytes and total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
+        _require(len(data) <= max_bytes and total <= package_limit, "Audit package exceeds size limit")
         read_cache[relative] = data
         return data
 
@@ -281,7 +283,12 @@ def _validate_audit(directory):
     complete_contract = metadata["schema_version"] in {"1.3", "1.4"}
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
         _require(hashlib.sha256(read(f"prompts/{name}")).hexdigest() == expected, "Prompt fingerprint mismatch")
-    new_prompt = community.PROMPT_MARKER.encode() in read("prompts/audit.md")
+    audit_prompt = read("prompts/audit.md")
+    whole_edition = b"Group-Delivery: complete_six_topics_v1" in audit_prompt.splitlines()
+    if (whole_edition and layered_budget and page_scope is None
+            and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines()):
+        package_limit = WHOLE_EDITION_PACKAGE_BYTES
+    new_prompt = community.PROMPT_MARKER.encode() in audit_prompt
     _require(discovery_contract == new_prompt, "Coverage contract must match the original frozen audit prompt")
     history_bytes = read("history.json")
     _require(hashlib.sha256(history_bytes).hexdigest() == metadata["inputs"]["history_sha256"], "History fingerprint mismatch")
@@ -680,7 +687,7 @@ def _validate_audit(directory):
         resolution = call.get("coverage_resolution")
         if resolution is not None:
             _require(layered_budget and call["stage"] == "research" and call["status"] == "partial"
-                     and allow_partial and not coverage_gaps and not unchecked,
+                     and allow_partial and (whole_edition or not coverage_gaps) and not unchecked,
                      "Coverage resolution requires a retained partial research stage and completed current checks")
             attempt = call["attempt_records"][-1]
             _require(attempt["result_sha256"] is not None, "Coverage resolution needs the original research result")
@@ -825,11 +832,14 @@ def _validate_audit(directory):
                      "Original research cannot finish before its retained no-dispatch observations")
             _require(all(community.executed_source_status(source) == "ok" and _time(source["retrieved_at"]) > research_finished for source in resolved),
                      "Coverage resolution needs successful evidence retrieved after the original result")
-            for name in prior_gaps:
-                _require(any(source["id"] in metadata["checks"][name]["source_ids"]
-                             and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"])) for source in resolved),
-                         "Coverage resolution must bind later evidence for every original gap")
-            warnings.append({"code": "research_coverage_resolved", "path": f"model_calls[{index}]"})
+            supported = {name for name in prior_gaps if any(
+                source["id"] in metadata["checks"][name]["source_ids"]
+                and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"]))
+                for source in resolved)}
+            _require(supported and set(prior_gaps) - set(coverage_gaps) <= supported,
+                     "Coverage resolution must bind later evidence for every original gap marked complete")
+            code = "research_coverage_partially_resolved" if coverage_gaps else "research_coverage_resolved"
+            warnings.append({"code": code, "path": f"model_calls[{index}]"})
         if call["status"] == "ok":
             _require(not call["error"], "Successful model stage cannot contain an error")
         elif call["status"] == "partial":
@@ -981,6 +991,17 @@ def _validate_audit(directory):
         accounting["charged_seconds"] = accounting["successful_seconds"] + accounting["reserved_unknown_seconds"]
         if accounting["charged_seconds"] > limits["run_seconds"] + LAYERED_TIME_TOLERANCE:
             blockers.append("run_budget_exceeded")
+    if previous_report is None and (whole_edition or metadata["date"] >= "2026-11-19"):
+        articles = draft.get("articles") if draft_sha is not None else None
+        report_fields = {"schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"}
+        if (page_scope is not None or not isinstance(articles, list) or draft.get("schema_version") != "1.0"
+                or type(draft.get("revision")) is not int or draft["revision"] != 1 or set(draft) != report_fields
+                or not all(isinstance(a, dict) for a in articles)
+                or [a.get("id") for a in articles] != list(PAGE_CHECKS)
+                or not all(isinstance(entry.get("article_id"), str) and entry["article_id"] in PAGE_CHECKS for entry in draft["entries"])
+                or {entry["article_id"] for entry in draft["entries"]} != set(PAGE_CHECKS)):
+            blockers.append("complete_edition_required")
+
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
             "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected_count else "zero_items")),
             "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": selected_count,
