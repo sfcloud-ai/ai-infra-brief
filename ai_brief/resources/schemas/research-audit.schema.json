@@ -134,7 +134,8 @@
               "ok",
               "failed",
               "timeout",
-              "unknown"
+              "unknown",
+              "not_dispatched"
             ]
           },
           "attempts": {
@@ -151,7 +152,10 @@
             "maximum": 86400
           },
           "retrieved_at": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "published_at": {
@@ -199,7 +203,8 @@
                     "ok",
                     "failed",
                     "timeout",
-                    "unknown"
+                    "unknown",
+                    "not_dispatched"
                   ]
                 },
                 "elapsed_seconds": {
@@ -224,6 +229,14 @@
                   "type": "number",
                   "exclusiveMinimum": 0,
                   "maximum": 3600
+                },
+                "operation_id": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+                },
+                "not_dispatched_evidence_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
                 }
               },
               "required": [
@@ -254,6 +267,44 @@
                   "required": [
                     "timing_unavailable_reason"
                   ]
+                }
+              ],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "status": {
+                        "const": "not_dispatched"
+                      }
+                    }
+                  },
+                  "then": {
+                    "required": [
+                      "operation_id",
+                      "not_dispatched_evidence_sha256"
+                    ],
+                    "properties": {
+                      "elapsed_seconds": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "else": {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "operation_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "not_dispatched_evidence_sha256"
+                          ]
+                        }
+                      ]
+                    }
+                  }
                 }
               ]
             }
@@ -544,6 +595,10 @@
                       "pattern": "^[a-f0-9]{64}$"
                     }
                   }
+                },
+                "prepublication_continuation_sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
                 }
               },
               "required": [

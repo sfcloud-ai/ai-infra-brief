@@ -134,7 +134,7 @@ metadata 和 summary 必须显式绑定 `budget_policy=successful_work_hourly_co
 
 `limits` 精确包含 `source_attempts`、`model_attempts`（成功次数额度，各最多 2）、`source_attempt_seconds`（单次网络读取上限，最多 180 秒）、`model_stage_seconds`（成功阶段操作上限，最多 3600 秒）、`run_seconds`（累计成功操作耗时额度，最多 3600 秒），值必须与 T4 原计划或已批准 grant 所提供的有效预算逐项一致。旧计划恢复在独立归档记录采用时间、grant SHA、新验证器 SHA 与原输入 SHA，不修改原计划、原失败或原提示词。真实失败和 timeout 保留实际耗时及次数，但不扣成功额度；不能把未知结果标为失败释放额度。未知结果或未知耗时保守保留该操作原 reserved_seconds 与实际已知耗时两者中的较大额度，不补零。网络有限重试与阶段接续由 T4 原授权策略控制，按下一可执行小时 :20 恢复未完成任务，不绕过授权或无限热循环。
 
-每条 source 和 model_calls 均须 `attempt_records`，长度等于 attempts；attempts 始终为历史实际尝试总数而非成功计费次数。顺序保留所有实际尝试。共同字段为 `status`、`elapsed_seconds`、`error`、`reserved_seconds`（原 T4 操作真实预留，必须大于零且不超过对应类型上限；恢复旧记录逐项读回，不猜测）；null 时间必须另有 `timing_unavailable_reason`。来源 status 为 ok/failed/timeout/unknown；模型还可 partial。成功 error 为空，其他状态保留具体原因。最后一项状态与累计记录一致。来源在前次结果及耗时均已知、原宿主授权和剩余额度成立时可再次读取，例如 HTTP 成功但仅取得动态空壳后补读渲染页面；同一来源保留全部尝试，原成功照常计费，后次未知耗时照常保留预留。模型同轮接续仍须原明确失败/超时已经核验；未知结果或计时不能直接重放。权限拒绝与外部写入结果未知不按普通网络波动重试。
+每条 source 和 model_calls 均须 `attempt_records`，长度等于 attempts；attempts 始终为历史授权尝试总数（包括已认证的未派发预留）而非成功计费次数。顺序保留所有实际尝试。共同字段为 `status`、`elapsed_seconds`、`error`、`reserved_seconds`（原 T4 操作真实预留，必须大于零且不超过对应类型上限；恢复旧记录逐项读回，不猜测）；null 时间必须另有 `timing_unavailable_reason`。来源 status 为 ok/failed/timeout/unknown/not_dispatched；模型还可 partial。成功 error 为空，其他状态保留具体原因。最后一项状态与累计记录一致。来源在前次结果及耗时均已知、原宿主授权和剩余额度成立时可再次读取，例如 HTTP 成功但仅取得动态空壳后补读渲染页面；同一来源保留全部尝试，原成功照常计费，后次未知耗时照常保留预留。模型同轮接续仍须原明确失败/超时已经核验；未知结果或计时不能直接重放。权限拒绝与外部写入结果未知不按普通网络波动重试。
 
 source 累计 elapsed_seconds 包含请求、等待和退避，不与单次网络上限混用。model 累计 elapsed_seconds 保留所有实际尝试耗时，不因以前失败累计超过成功操作上限而阻断。成功操作本身超过相应上限仍阻断；网络超时作为失败事实保留，允许其他证据合规的非零项部分晨报。started_at、finished_at 与整轮墙钟时间保持真实，跨小时等待不消耗成功研究额度。summary 的 budget_accounting 分别列出 successful_attempts/seconds、failed_attempts/seconds、unknown_attempts、reserved_unknown_seconds 和 charged_seconds；run_elapsed_seconds 是实际跨小时墙钟，不冒称模型推理耗时。
 
@@ -163,3 +163,33 @@ v1.4 的研究阶段因真实来源缺口完成为 `partial/coverage_incomplete`
 - 遇到日期冲突须能追溯交叉核验及最终采用依据，未解决明确待核验。不得填假时区/午夜，不把抓取时间当发布，不能将证据不足新闻改名 status_entries 绕过现有 schema。
 - 对新模型核对 GPU 资源分配与隔离组件 + 权重共享 + kvcached 三层分析：共享前提、精度/内核/版本、状态布局与生命周期、TP/PP、native/managed 边界、预算与隔离风险；实际测试、官方声明、代码证据与推断分开。没有具体组合证据不可写“直接兼容/已支持”。
 - 模型正式发布与部署评估证据分开：新闻事实已核验而兼容性未知时，可报道发布并明确具体适配缺口；不得因后者未知抹掉前者，也不放宽事实/时间/隐私/原包绑定门禁。
+
+
+## 已过期但未派发的来源预留
+
+仅在原调度授权已经过期、确实没有发出来源请求，并由原 Host 协议认证归档及结算后，来源可记录 `not_dispatched`。它不是失败、成功或已检查的覆盖，不得用它伪造响应或退款。`attempts` 统计保留的授权尝试，包括这类未派发预留；模型不得使用此状态。
+
+- `attempt_records` 追加 `status=not_dispatched`、`elapsed_seconds=null`、非空 `error`/`timing_unavailable_reason`、原数值 `reserved_seconds`、`operation_id`、`not_dispatched_evidence_sha256`。保留原尝试顺序和全部前缀；取消仅计原保留预算、未知尝试和次数上限，不计真实失败或成功。后续重试须取得新的原始 grant，原 reservation 先按 Host 协议结算；重试真实 `retrieved_at` 不可早于未派发观察时间，按字段实际记录精度比较时间区间，同一精度区间不推断更细顺序；尾部取消观察不得早于最后真实读取，连续取消观察依尝试顺序保留。
+- 证据保存为 `stage_artifacts/<sha256>.json` 原字节。结果为 `source_not_dispatched_v1`，包含 `request_id,operation_id,url,input_sha256,status,dispatch_started=false,source_requests=0,elapsed_seconds=null,reserved_seconds,observation_sha256,grant_command_id,grant_receipt_ts`。`input_sha256` 必须来自原 Host 的 GET URL canonical identity，保留原 URL 和原证据字节，不把原字符串散列冒充已排序归一化身份。
+- 原观察文件 `artifact_kind=local_dispatch_observation_not_settlement`、`status=not_dispatched_grant_expired`，绑定同一 `request_id,operation_ids,dispatch_started=false,source_requests=0,command_id,receipt_ts,observed_at`。它只是本地观察，不能自称权威结算。观察时间不得早于其原回执；通常也不得早于回执后 60 秒；若原 grant lease 更早过期，结果还需 `grant_receipt_sha256`，对应完整原始 `!ai-research control-receipt ` 加 JSON 字节，由 Host 对账本验证，不能自报 lease。
+- 取消后的有效来源结果仍是最近一次真实执行结果。若没有真实执行，`content_sha256=null,retrieved_at=null`、无响应证据，覆盖仍为未检查；真实失败后取消仍是实际失败，成功后取消可保留既有证据，但不可改变正文哈希、检索时间、发布时间、URL 等来源事实。只追加取消不能补齐原缺口。
+- Discovery 保留取消 query，`response_sha256=null,results=[]`；含取消的 source 的每个保留尝试（含取消、真实成功、失败或超时）都必须绑定原 query 和 mode，不能只列末尾取消来隐藏前次失败。`backscan/followup` 各最多两次真实查询；取消保留预算与总记录限制但不算已执行辅助查询。
+
+本节只作用于新冻结的提示词版本。既有任务冻结的提示词、原始 grant、结果与账本不得重写；本期兼容由已批准的协议及真实原证据承接。
+
+原研究结果中的来源尝试前缀还须保留当时的观察时间；取消观察不得晚于原研究 finished_at，后续真正新增的尝试才可发生在其后。
+
+含未派发记录的来源在 page successor 追加真实读取时，retrieved_at 还须不早于认证前一轮 finished_at，按记录精度比较。取消观察使用带秒和时区的 ISO 时间（T/t/空格分隔，Z 或 ±hh:mm），保留全部小数精度。旧冻结合同中不含取消的来源仍按原查询记录规则核验，不追补或改写原证据。
+
+
+### 首发前追加模型证据（仅新版已批准协议）
+
+同一首发轮次的普通失败恢复仍只接受前次 failed/timeout；前次 ok/partial 只能通过已验证的首发前增量续接。不得重置预算、覆写旧 attempt 或复用过期 grant。该路径必须保留 attempt 的 `prepublication_continuation_sha256`，指向 `model_prepublication_continuation_evidence_v1` 原始证明。
+
+- 证明包含真实当前 operation_id、原 reserve/settle command 与 control_observed receipt 的 SHA 引用，以及每项新增来源的 source_id/attempt_index 映射；已知当前结果也必须保留其原结算回执。所有原字节置于 `stage_artifacts/<sha256>.json`，离线自洽不能替代 Host 对真实账本的最终许可核验。
+- 输入 manifest 为 `model_prepublication_continuation_v1`，绑定原 result checkpoint、真实新增 evidence 和 payload。保留原输入原字节；payload 可仅列增量，但未列为新增的上下文必须与原输入一致，不得夹带未经证明的新来源。
+- 当前轮次的 research 结果须声明并保留最终 candidates 文件，或现有包含 candidates 的真实研究输出；editor 结果须声明并保留最终 draft 原字节。失败后的同轮普通重试仍继承这些要求。后续已认证页面继续保留旧前缀，不用新稿覆写旧轮输出。
+- editor-only 续接不能新增研究候选；必须从旧 editor 输入所引用且确属已保留 research attempt 的结果核对候选 items（不限制 notes 等无关元信息）。两阶段都续接时，editor 需实际引用产生最终候选的新 research 结果。仅 research 续接时，旧 editor 已声明输出必须仍能证明最终 draft，否则需要新的 editor 工作。
+- 首次模型 attempt 的 recovery `checkpoint_sha256` 可为 null；run-level 归档 checkpoint 与模型恢复 checkpoint 不是同一字段。不得修改已冻结的历史前缀、原 result 内字段或账本。新续接必须指向真实上一模型 result，而不是擅自重写原输入。
+
+本节仅供新提示词版本使用；历史冻结提示词和原文件保持原字节，不能为本期迁移重新序列化。
