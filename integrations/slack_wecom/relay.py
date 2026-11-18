@@ -735,6 +735,13 @@ class Store:
                                    " WHERE request_id=? AND status NOT IN ('pending','failed','not_attempted') LIMIT 1",
                                    (request_id,)).fetchone() for table in ("parts", "image_parts"))
 
+    def started_notice_owner(self, day, day_key, edition_key):
+        owners = [self.get("started:" + day_key), self.get(day_key) or self.get(edition_key)]
+        for table in ("scheduled_notices", "scheduled_revision_notices"):
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                owners.extend(row[0] for row in self.db.execute("SELECT request_id FROM " + table + " WHERE report_date=?", (day,)))
+        return next((owner for owner in owners if self.delivery_started(owner)), None)
+
     def status(self, request_id):
         row = self.db.execute("SELECT status,parts_total,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
         if not row:
@@ -782,8 +789,7 @@ class Relay:
                     scope = [self.config["team_id"], self.config["channel_id"]]
                     day_key = "notice_day:" + digest([*scope, day])
                     edition_key = "notice_edition:" + digest([*scope, candidate["url"]])
-                    owners = (self.store.get("started:" + day_key), self.store.get(day_key) or self.store.get(edition_key))
-                    if not any(self.store.delivery_started(owner) for owner in owners):
+                    if not self.store.started_notice_owner(day, day_key, edition_key):
                         raise
                 # 读取失败在游标推进及投递写入之前向外传播。
                 manifest = self.notice_reader.read(candidate)
@@ -963,10 +969,11 @@ class Relay:
             if prior and not repeat:
                 status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
             if status == "sending":
-                if edition and edition_request and self.store.delivery_started(edition_request):
+                started_owner = self.store.started_notice_owner(report_date, day_key, edition) if edition else None
+                if started_owner:
                     # 更正通知可能接替日期所有者后发送失败，须保留此前已开始的投递。
-                    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("started:" + day_key, edition_request))
-                if edition and not self.store.delivery_started(self.store.get("started:" + day_key)):
+                    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("started:" + day_key, started_owner))
+                if edition and not started_owner:
                     try:
                         notice_format.validate_first_notice({"report_date":report_date,"notice_key":notice_key,"text":text},
                                                             self.config["notice_connector"]["report_base_url"])

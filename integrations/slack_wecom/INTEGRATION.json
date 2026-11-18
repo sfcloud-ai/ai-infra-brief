@@ -30,6 +30,6 @@
   "deployment_executed": false,
   "real_research_and_slack_publisher": "not_connected",
   "reviewed_notice_ast_sha256_without_docstrings": {
-    "relay.py": "da3d2e936b13028814c4e19b4bf221f7908dc552383bf8c2bc22429e3a3c8d52"
+    "relay.py": "027b154e5160c20e26933f0d95fa0c7ec72c886ab4722e79931b3958cfdf708d"
   }
 }

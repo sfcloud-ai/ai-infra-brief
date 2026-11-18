@@ -732,6 +732,7 @@ def _validate_audit(directory):
                 blockers.append("required_coverage_incomplete")
 
     calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, {}, {}, {}
+    resolved_topic_reads = set()
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
@@ -894,6 +895,9 @@ def _validate_audit(directory):
             repaired = set(prior_gaps) - set(coverage_gaps)
             _require(repaired and repaired <= supported,
                      "Coverage resolution must bind later evidence for every original gap marked complete")
+            resolved_topic_reads = {(name, source["id"]) for name in repaired for source in resolved
+                                    if source["id"] in metadata["checks"][name]["source_ids"]
+                                    and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"]))}
             code = "research_coverage_partially_resolved" if coverage_gaps else "research_coverage_resolved"
             warnings.append({"code": code, "path": f"model_calls[{index}]"})
         if call["status"] == "ok":
@@ -998,6 +1002,7 @@ def _validate_audit(directory):
                                 for table, records in ((metadata["checks"], sources), (prior_checks, retained_sources))
                                 for check in checks for ref in table.get(check, {}).get("source_ids", ())
                                 if community.executed_source_status(records[ref]) == "ok"
+                                and (not prior_checks or table is prior_checks or (check, ref) in resolved_topic_reads)
                                 and (check in community.CHECKS or source_matches(check, records[ref]["url"]))}
         for discovery, records in ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources)):
             for query in discovery.get("queries", []):
@@ -1005,7 +1010,8 @@ def _validate_audit(directory):
                     if result["disposition"] in SELECTED:
                         discovered_reads.setdefault((query["family"], result["event_key"]), set()).update(
                             (ref, records[ref]["content_sha256"]) for ref in result["source_ids"]
-                            if community.executed_source_status(records[ref]) == "ok")
+                            if community.executed_source_status(records[ref]) == "ok"
+                            and (not prior_checks or discovery is prior_discovery or (query["family"], ref) in resolved_topic_reads))
     supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]
     if draft_sha is None:

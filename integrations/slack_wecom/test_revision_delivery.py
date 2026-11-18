@@ -132,6 +132,10 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(self.q.revisions.parts(self.plan["report_request_id"]), before)
         self.assertEqual(self.q.status(rid)["delivery_kind"], "initial")
         self.assertEqual([c[0] for c in self.calls], ["text", "image"])
+        scope = [self.q.config["team_id"], self.q.config["channel_id"]]
+        day_key = "notice_day:" + relay.digest([*scope, "2026-11-01"])
+        edition_key = "notice_edition:" + relay.digest([*scope, self.plan["notice_key"]])
+        self.assertEqual(self.store.started_notice_owner("2026-11-01", day_key, edition_key), rid)
         self.assertEqual(self.q.inspect(self.plan["report_request_id"], "2026-11-01")["scheduler"]["phase"], "superseded")
         assert_reconciled(self.store)
         with self.store.db:

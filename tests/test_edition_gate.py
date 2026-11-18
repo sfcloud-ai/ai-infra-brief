@@ -88,6 +88,23 @@ class CompleteEditionTests(unittest.TestCase):
         case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
         self.assertIn("complete_edition_required", case.check()["blockers"])
 
+    def test_resumed_topic_uses_the_original_check_or_its_recorded_recovery(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        failed = layered.LayeredBudgetTests.failed(case, name="embodied_training", kind="transport")
+        failed["attempt_records"][0].update(status="failed", error=failed["error"])
+        hardware = next(s for s in case.audit["sources"] if s["id"] == "coverage-hardware")
+        hardware["url"] = "https://arxiv.org/abs/2611.10000"
+        pages = {entry["article_id"]: entry for entry in case.draft["entries"]}
+        pages["hardware-status"]["source_urls"] = [hardware["url"]]
+        output, result, call = case.retained_detail_resolution()
+        pages["embodied-training"]["source_urls"] = [hardware["url"]]
+        status = next(s for s in case.audit["status_entries"] if s["event_key"] == pages["embodied-training"]["event_key"])
+        status["source_ids"] = [hardware["id"]]
+        case.bind_retained_output(output, result, call)
+        case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
         case = self.discovery_edition()
         case.audit["checks"]["model_serving"]["source_ids"].append("source")
