@@ -726,6 +726,8 @@ class Store:
         self.db.commit()
 
     def delivery_started(self, request_id):
+        if not request_id:
+            return False
         row = self.db.execute("SELECT status,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
         if row and (row[0] in {"sending", "sent", "unknown"} or row[1] > 0):
             return True
@@ -933,12 +935,17 @@ class Relay:
             if prior and not repeat:
                 status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
             if status == "sending":
-                if edition and (edition_request is None or not self.store.delivery_started(edition_request)):
+                if edition and edition_request and self.store.delivery_started(edition_request):
+                    # 更正通知可能接替日期所有者后发送失败，须保留此前已开始的投递。
+                    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("started:" + day_key, edition_request))
+                if edition and not self.store.delivery_started(self.store.get("started:" + day_key)):
                     try:
                         notice_format.validate_first_notice({"report_date":report_date,"notice_key":notice_key,"text":text},
                                                             self.config["notice_connector"]["report_base_url"])
                     except notice_format.FirstNoticeIncomplete as exc:
                         if mode == "auto":
+                            print(json.dumps({"event":"first_notice_requires_all_six_articles","report_date":report_date,
+                                              "message_ts":timestamp}), flush=True)
                             return {"status":"rejected","error":"first_notice_requires_all_six_articles"}
                         raise RelayError("first_notice_requires_all_six_articles", 409) from exc
                 verified_images, preflight_error = self.prepare_notice_images(image_plans)

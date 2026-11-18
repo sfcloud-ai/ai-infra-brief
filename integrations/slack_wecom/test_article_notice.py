@@ -237,7 +237,10 @@ class ArticleDeliveryTests(unittest.TestCase):
         complete = n.build_manifest(data, PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
         receiver = self.receiver(expected=partial)
         self.slack.messages = [message(1, partial)]
-        receiver.poll()
+        with patch("builtins.print") as log:
+            receiver.poll()
+        record = json.loads(log.call_args.args[0])
+        self.assertEqual(record, {"event":"first_notice_requires_all_six_articles","report_date":day,"message_ts":ts(1)})
         self.assertEqual(self.store.get("cursor"), ts(1))
         self.assertEqual(self.wecom.sent, [])
         self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", ("auto:"+ts(1),)).fetchone())
@@ -245,6 +248,15 @@ class ArticleDeliveryTests(unittest.TestCase):
         self.slack.messages = [message(2, complete)]
         receiver.poll()
         self.assertEqual((len(self.wecom.sent),len(self.images)),(1,1))
+        receiver = self.receiver(expected=partial)
+        self.slack.messages = [message(3, partial)]
+        correction = {"request_id":"correction-one","message_ts":ts(3),"allow_repeat":True,"reason":"correct original notice"}
+        self.slack.download_image = lambda plan: b"invalid"
+        self.assertEqual(receiver.dispatch("/manual/slack-message", correction, os.getuid())["status"], "failed")
+        self.slack.download_image = lambda plan: PNG
+        retry = dict(correction, request_id="correction-two")
+        self.assertEqual(receiver.dispatch("/manual/slack-message", retry, os.getuid())["status"], "sent")
+        self.assertEqual((len(self.wecom.sent),len(self.images)),(2,2))
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)

@@ -83,7 +83,7 @@ def _topic_handoff(call, read):
         matches = [result["output_sha256"]]
     if not matches:
         return {}
-    statuses = [result[name] for name in ("stage_status", "status") if name in result]
+    statuses = ["ok" if result[name] == "success" else result[name] for name in ("stage_status", "status") if name in result]
     _require(hashlib.sha256(raw).hexdigest() == digest and result.get("stage") == "research"
              and result.get("input_sha256") == attempt["input_sha256"] and statuses
              and all(s == attempt["status"] == call["status"] for s in statuses)
@@ -1043,7 +1043,7 @@ def _validate_audit(directory):
                     allowed = set(topic_urls[page])
                     for check in page_checks[page]:
                         allowed.update(discovered_urls.get((check, key), ()))
-                    if not needed <= allowed:
+                    if not status or not needed <= allowed:
                         if handoff is None:
                             handoff = _topic_handoff(calls.get("research"), read)
                         if status:
@@ -1053,10 +1053,12 @@ def _validate_audit(directory):
                                     if (ref["url"], ref["content_sha256"]) == (item.get("url"), item.get("content_sha256")):
                                         allowed.add(ref["url"])
                         else:
-                            for item in handoff.get("candidate_bindings_and_decisions", []):
-                                if (isinstance(item, dict) and item.get("article_id") == page and item.get("event_key") == key
-                                        and item.get("primary_source_id") in binding["source_ids"]):
-                                    allowed.add(sources[item["primary_source_id"]]["url"])
+                            assignments = [item for item in handoff.get("candidate_bindings_and_decisions", [])
+                                           if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
+                            if assignments:
+                                allowed = {sources[item["primary_source_id"]]["url"] for item in assignments
+                                           if item.get("primary_source_id") in binding["source_ids"]}
+                                supported_entries &= all(item["article_id"] == page for item in assignments)
                     supported_entries &= needed <= allowed
             if key in decisions and decisions[key]["disposition"] == "update":
                 _require(entry.get("update_of") in decisions[key]["history_entry_ids"], "Draft update must preserve its history relationship")

@@ -106,9 +106,10 @@ class RevisionDelivery:
                     raise ValueError("page_predecessor_receipt_incomplete")
             day_key = "notice_day:" + relay.digest([self.parent.config["team_id"], self.parent.config["channel_id"], day])
             day_owner = self.parent.store.get(day_key)
-            if day_owner and not original and not any(r[0] == day_owner for r in revisions) and not self.started(day_owner):
+            day_started = self.started(day_owner) or self.started(self.parent.store.get("started:" + day_key))
+            if day_owner and not original and not any(r[0] == day_owner for r in revisions) and not day_started:
                 raise ValueError("legacy_initial_reconciliation_required")
-            started = (bool(day_owner and self.started(day_owner))
+            started = (day_started
                        or bool(original and self.started(original[0]))
                        or any(self.started(row[0]) for row in revisions))
             covered = []

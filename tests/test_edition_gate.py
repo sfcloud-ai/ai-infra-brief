@@ -5,6 +5,7 @@ import unittest
 
 from ai_brief.contracts import RESOURCE_ROOT
 from ai_brief.research_audit import PAGE_CHECKS
+from ai_brief.storage import BriefError
 from tests import test_community_discovery as community
 from tests import test_layered_budget as layered
 from tests import test_page_scope as scoped
@@ -179,10 +180,27 @@ class CompleteEditionTests(unittest.TestCase):
         findings = {"page_status_sources": {"small-model-status": [
             dict(source_id=ref, url=official["url"], content_sha256=official["content_sha256"])]}}
         output = self.artifact(original_audit.encoded(findings))
-        result = dict(stage="research", status=attempt["status"], input_sha256=attempt["input_sha256"],
+        result = dict(stage="research", status="success", stage_status="ok", input_sha256=attempt["input_sha256"],
                       elapsed_seconds=attempt["elapsed_seconds"], outputs=[dict(name="findings.json", sha256=output)])
         attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
         self.assertEqual(self.check()["readiness"], "ready")
+        entry = self.draft["entries"][0]
+        assignment = dict(article_id="inference-engines", event_key=entry["event_key"], primary_source_id="source")
+        findings["candidate_bindings_and_decisions"] = [assignment]
+        def bind_findings():
+            result["outputs"][0]["sha256"] = self.artifact(original_audit.encoded(findings))
+            attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
+        bind_findings()
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        assignment["article_id"] = entry["article_id"]
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        result["stage_status"] = "failed"
+        bind_findings()
+        with self.assertRaisesRegex(BriefError, "match the settled research attempt"):
+            self.check()
+        result["stage_status"] = "ok"
+        bind_findings()
         check["source_ids"].remove(ref)
         base_ref = "coverage-small_models"
         status["source_ids"] = [base_ref]
