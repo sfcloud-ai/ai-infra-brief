@@ -676,7 +676,7 @@ def _validate_audit(directory):
             else:
                 blockers.append("required_coverage_incomplete")
 
-    calls, retained_sources, retained_source_text = {}, {}, {}
+    calls, retained_sources, retained_source_text, prior_checks = {}, {}, {}, {}
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
@@ -836,7 +836,8 @@ def _validate_audit(directory):
                 source["id"] in metadata["checks"][name]["source_ids"]
                 and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"]))
                 for source in resolved)}
-            _require(supported and set(prior_gaps) - set(coverage_gaps) <= supported,
+            repaired = set(prior_gaps) - set(coverage_gaps)
+            _require(repaired and repaired <= supported,
                      "Coverage resolution must bind later evidence for every original gap marked complete")
             code = "research_coverage_partially_resolved" if coverage_gaps else "research_coverage_resolved"
             warnings.append({"code": code, "path": f"model_calls[{index}]"})
@@ -932,6 +933,18 @@ def _validate_audit(directory):
         _require(linked and all(community.executed_source_status(source) == "ok" for source in linked),
                  "Coverage status requires successful source evidence")
         status_entries[key] = entry
+    first_edition = previous_report is None and (whole_edition or metadata["date"] >= "2026-11-19")
+    topic_urls, discovered_urls = {}, {}
+    if first_edition:
+        for page, checks in page_checks.items():
+            topic_urls[page] = {sources[ref]["url"] for table in (metadata["checks"], prior_checks)
+                                for check in checks for ref in table.get(check, {}).get("source_ids", ())}
+        for query in metadata.get("discovery", {}).get("queries", []):
+            for result in query["results"]:
+                if result["disposition"] in SELECTED:
+                    discovered_urls.setdefault((query["family"], result["event_key"]), set()).update(
+                        sources[ref]["url"] for ref in result["source_ids"])
+    supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]
     if draft_sha is None:
         blockers.append("draft_missing")
@@ -981,6 +994,16 @@ def _validate_audit(directory):
             _require(isinstance(urls, list) and urls and all(isinstance(url, str) and url in permitted for url in urls)
                      and (key in status_entries or by_event[key]["source_url"] in urls),
                      "Draft sources differ from retained candidate evidence")
+            if first_edition:
+                page = entry.get("article_id")
+                if not isinstance(page, str) or page not in topic_urls:
+                    supported_entries = False
+                elif key in status_entries:
+                    supported_entries &= set(urls) <= topic_urls[page]
+                else:
+                    primary = by_event[key]["source_url"]
+                    supported_entries &= primary in topic_urls[page] or any(
+                        primary in discovered_urls.get((check, key), ()) for check in page_checks[page])
             if key in decisions and decisions[key]["disposition"] == "update":
                 _require(entry.get("update_of") in decisions[key]["history_entry_ids"], "Draft update must preserve its history relationship")
             else:
@@ -991,7 +1014,7 @@ def _validate_audit(directory):
         accounting["charged_seconds"] = accounting["successful_seconds"] + accounting["reserved_unknown_seconds"]
         if accounting["charged_seconds"] > limits["run_seconds"] + LAYERED_TIME_TOLERANCE:
             blockers.append("run_budget_exceeded")
-    if previous_report is None and (whole_edition or metadata["date"] >= "2026-11-19"):
+    if first_edition:
         articles = draft.get("articles") if draft_sha is not None else None
         report_fields = {"schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"}
         if (page_scope is not None or not isinstance(articles, list) or draft.get("schema_version") != "1.0"
@@ -999,7 +1022,7 @@ def _validate_audit(directory):
                 or not all(isinstance(a, dict) for a in articles)
                 or [a.get("id") for a in articles] != list(PAGE_CHECKS)
                 or not all(isinstance(entry.get("article_id"), str) and entry["article_id"] in PAGE_CHECKS for entry in draft["entries"])
-                or {entry["article_id"] for entry in draft["entries"]} != set(PAGE_CHECKS)):
+                or {entry["article_id"] for entry in draft["entries"]} != set(PAGE_CHECKS) or not supported_entries):
             blockers.append("complete_edition_required")
 
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,

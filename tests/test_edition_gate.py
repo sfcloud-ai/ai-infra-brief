@@ -42,6 +42,7 @@ class CompleteEditionTests(unittest.TestCase):
 
     def test_recovered_check_can_coexist_with_another_disclosed_gap(self):
         case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
         failed = layered.LayeredBudgetTests.failed(case, kind="transport")
         failed["attempt_records"][0].update(status="failed", error=failed["error"])
         output, original, call = case.retained_detail_resolution()
@@ -51,6 +52,17 @@ class CompleteEditionTests(unittest.TestCase):
         self.assertEqual(result["coverage_incomplete"], ["qwen_blog"])
         self.assertIn("research_coverage_partially_resolved", {w["code"] for w in result["warnings"]})
         self.assertEqual(output["checks"]["qwen_blog"]["status"], "failed")
+
+    def test_other_topics_evidence_cannot_supply_the_only_entry_for_a_page(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        failed = layered.LayeredBudgetTests.failed(case, name="embodied_training", kind="transport")
+        failed["attempt_records"][0].update(status="failed", error=failed["error"])
+        entry = next(e for e in case.draft["entries"] if e["article_id"] == "embodied-training")
+        status = next(s for s in case.audit["status_entries"] if s["event_key"] == entry["event_key"])
+        hardware = next(s for s in case.audit["sources"] if s["id"] == "coverage-hardware")
+        status["source_ids"], entry["source_urls"] = [hardware["id"]], [hardware["url"]]
+        self.assertIn("complete_edition_required", case.check()["blockers"])
 
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
         case = self.discovery_edition()

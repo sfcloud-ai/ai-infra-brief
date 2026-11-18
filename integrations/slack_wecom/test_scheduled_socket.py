@@ -23,7 +23,17 @@ class Tests(unittest.TestCase):
             socket.handle(object(),456,q)
         self.assertEqual(q.reads,[]);self.assertEqual(q.writes,[])
     def test_admit_has_no_send_or_tick(self):
-        q=Queue();socket.dispatch(json.dumps({"action":"admit","request_id":"day","bundle_base64":"eA==","report_commit":"a"*40}).encode(),q)
+        from scheduled_client import read_result
+        q=Queue()
+        request=json.dumps({"action":"admit","request_id":"day","bundle_base64":"eA==","report_commit":"a"*40}).encode()
+        socket.dispatch(request,q)
         self.assertEqual(q.writes,[("day",b'x','a'*40)])
+        with patch.object(q, "admit", side_effect=socket.FirstNoticeIncomplete()):
+            refusal=socket.dispatch(request,q)
+        self.assertEqual(refusal["error"], "first_notice_requires_all_six_articles")
+        self.assertEqual(read_result(json.dumps(refusal).encode(),request),refusal)
+        refusal["bundle_sha256"]="0"*64
+        with self.assertRaises(ValueError):
+            read_result(json.dumps(refusal).encode(),request)
 
 if __name__=='__main__':unittest.main()

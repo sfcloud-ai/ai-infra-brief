@@ -29,6 +29,10 @@ class NoticeReadError(Exception):
     """投递前公开读取失败；保留原消息游标，不跳过待处理消息。"""
 
 
+class FirstNoticeIncomplete(ValueError):
+    """已验证的固定版本不具备整期首发的六个稳定链接。"""
+
+
 def require(condition):
     if not condition:
         raise ValueError("invalid_article_notice")
@@ -160,10 +164,13 @@ def validate_first_notice(plan, base):
     day = plan["report_date"]
     if day < "2026-11-19":
         return
-    notice = parse_article_text(plan["text"], base)
+    try:
+        notice = parse_article_text(plan["text"], base)
+    except ValueError as exc:
+        raise FirstNoticeIncomplete("first_notice_requires_all_six_articles") from exc
     if (notice["date"] != day or notice["revision"] is not None
             or notice["index_url"] != plan["notice_key"] or tuple(a["id"] for a in notice["articles"]) != TOPICS):
-        raise ValueError("first_notice_requires_all_six_articles")
+        raise FirstNoticeIncomplete("first_notice_requires_all_six_articles")
 
 
 def match_manifest(candidate, manifest, base):
