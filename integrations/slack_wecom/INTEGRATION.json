@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "source_manifest": "SOURCE_EXPORT.json",
   "runtime_changes": [
+    "11 月 19 日起，定时队列和连接器均在首次投递前核对完整六篇的稳定链接；缺页消息不占用当日入口，已尝试的原请求沿原账本核对。",
     "自动晨报接受 file_share 子类型；仍要求固定发送者、匹配标题、根消息且未经编辑。",
     "本地 HTTP 请求在解析请求行和请求头之前设置套接字超时。",
     "图片下载在服务主线程通过 POSIX 定时器施加覆盖阻塞读取的总超时；已有定时器时失败关闭。",
@@ -29,6 +30,6 @@
   "deployment_executed": false,
   "real_research_and_slack_publisher": "not_connected",
   "reviewed_notice_ast_sha256_without_docstrings": {
-    "relay.py": "a086f5c5f243cfb7d1737027800938ff7ab5930ffa87f8482cab056a62e36b67"
+    "relay.py": "f941ce25831a3774da195b72bf7ca167a8b0e65738fcb1b8f38a43ca1a4c2530"
   }
 }
