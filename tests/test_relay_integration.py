@@ -86,7 +86,7 @@ class RelayIntegrationTests(unittest.TestCase):
 
     def test_original_and_connector_tests_run_with_outbound_guard(self):
         result = self.checked_runner()
-        self.assertEqual(result["tests_run"], 240)  # 含首次通知被修订版接替时的整期校验。
+        self.assertEqual(result["tests_run"], 241)  # 包括定时和连接器入口的整期首发。
         self.assertEqual(result["outbound_attempts"], 0)
         if result["skipped"]:
             self.assertEqual(result["skipped"], 3)

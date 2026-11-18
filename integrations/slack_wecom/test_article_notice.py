@@ -229,6 +229,23 @@ class ManifestReadTests(unittest.TestCase):
 
 
 class ArticleDeliveryTests(unittest.TestCase):
+    def test_connector_allows_the_complete_first_notice_after_rejecting_a_partial_one(self):
+        day = "2026-11-19"
+        data = report()
+        data.update(date=day, articles=[{"id":page, "title":page} for page in n.TOPICS])
+        partial = n.build_manifest(dict(data, articles=data["articles"][:1]), PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
+        complete = n.build_manifest(data, PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
+        receiver = self.receiver(expected=partial)
+        self.slack.messages = [message(1, partial)]
+        receiver.poll()
+        self.assertEqual(self.store.get("cursor"), ts(1))
+        self.assertEqual(self.wecom.sent, [])
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", ("auto:"+ts(1),)).fetchone())
+        receiver = self.receiver(expected=complete)
+        self.slack.messages = [message(2, complete)]
+        receiver.poll()
+        self.assertEqual((len(self.wecom.sent),len(self.images)),(1,1))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         state = Path(self.temp.name) / "state"; state.mkdir(mode=0o700)

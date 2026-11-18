@@ -725,6 +725,14 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(value)))
         self.db.commit()
 
+    def delivery_started(self, request_id):
+        row = self.db.execute("SELECT status,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
+        if row and (row[0] in {"sending", "sent", "unknown"} or row[1] > 0):
+            return True
+        return any(self.db.execute("SELECT 1 FROM " + table +
+                                   " WHERE request_id=? AND status NOT IN ('pending','failed','not_attempted') LIMIT 1",
+                                   (request_id,)).fetchone() for table in ("parts", "image_parts"))
+
     def status(self, request_id):
         row = self.db.execute("SELECT status,parts_total,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
         if not row:
@@ -925,6 +933,14 @@ class Relay:
             if prior and not repeat:
                 status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
             if status == "sending":
+                if edition and (edition_request is None or not self.store.delivery_started(edition_request)):
+                    try:
+                        notice_format.validate_first_notice({"report_date":report_date,"notice_key":notice_key,"text":text},
+                                                            self.config["notice_connector"]["report_base_url"])
+                    except notice_format.FirstNoticeIncomplete as exc:
+                        if mode == "auto":
+                            return {"status":"rejected","error":"first_notice_requires_all_six_articles"}
+                        raise RelayError("first_notice_requires_all_six_articles", 409) from exc
                 verified_images, preflight_error = self.prepare_notice_images(image_plans)
                 if preflight_error:
                     status = "failed"

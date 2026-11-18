@@ -47,9 +47,7 @@ class RevisionDelivery:
         return self.db.execute("SELECT file_id,content_hash,status,byte_size,ordinal FROM image_parts WHERE request_id=? ORDER BY ordinal", (request_id,)).fetchall()
 
     def started(self, request_id):
-        request = self.db.execute("SELECT status,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
-        return bool(request and (request[0] in {"sending", "sent", "unknown"} or request[1] > 0)
-                    or any(p[2] not in {"pending", "failed", "not_attempted"} for p in self.parts(request_id) + self.images(request_id)))
+        return self.parent.store.delivery_started(request_id)
 
     def status(self, request_id):
         row = self.row(request_id)

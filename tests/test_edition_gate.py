@@ -22,6 +22,12 @@ class CompleteEditionTests(unittest.TestCase):
         (self.root / "prompts" / "audit.md").write_bytes(data)
         self.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(data).hexdigest()
 
+    def serving_source(self, case):
+        uri = "https://github.com/vllm-project/vllm/pull/123"
+        source = next(s for s in case.audit["sources"] if s["id"] == "source")
+        source["url"] = case.candidates["items"][0]["source_url"] = uri
+        case.draft["entries"][0]["source_urls"] = [uri]
+
     def discovery_edition(self):
         case = community.CommunityDiscoveryTests("runTest")
         case.setUp()
@@ -32,6 +38,7 @@ class CompleteEditionTests(unittest.TestCase):
         case.draft.update(schema_version="1.0", title="合成晨报", subtitle="合成副标题", images=[], poster="assets/overview.png")
         case.draft["articles"] = [dict(id=page, title=page) for page in PAGE_CHECKS]
         case.draft["entries"][0]["article_id"] = "model-serving-gpu"
+        self.serving_source(case)
         for page in list(PAGE_CHECKS)[1:]:
             ref = "coverage-" + PAGE_CHECKS[page][0]
             uri = next(src["url"] for src in case.audit["sources"] if src["id"] == ref)
@@ -62,6 +69,8 @@ class CompleteEditionTests(unittest.TestCase):
         status = next(s for s in case.audit["status_entries"] if s["event_key"] == entry["event_key"])
         hardware = next(s for s in case.audit["sources"] if s["id"] == "coverage-hardware")
         status["source_ids"], entry["source_urls"] = [hardware["id"]], [hardware["url"]]
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+        case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
         self.assertIn("complete_edition_required", case.check()["blockers"])
 
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
@@ -136,6 +145,7 @@ class CompleteEditionTests(unittest.TestCase):
         self.draft.update(schema_version="1.2", articles=[dict(id=page, title=page) for page in pages],
                           page_delivery=delivery)
         self.draft["entries"][0]["article_id"] = pages[0]
+        self.serving_source(self)
         refs = self.audit["checks"]["model_serving"]["source_ids"]
         if "source" not in refs:
             refs.append("source")
@@ -164,6 +174,14 @@ class CompleteEditionTests(unittest.TestCase):
         status = next(item for item in self.audit["status_entries"] if item["event_key"] == small_entry["event_key"])
         check["source_ids"].append(ref)
         status["source_ids"], small_entry["source_urls"] = [ref], [official["url"]]
+        call = self.audit["model_calls"][0]
+        attempt = call["attempt_records"][-1]
+        findings = {"page_status_sources": {"small-model-status": [
+            dict(source_id=ref, url=official["url"], content_sha256=official["content_sha256"])]}}
+        output = self.artifact(original_audit.encoded(findings))
+        result = dict(stage="research", status=attempt["status"], input_sha256=attempt["input_sha256"],
+                      elapsed_seconds=attempt["elapsed_seconds"], outputs=[dict(name="findings.json", sha256=output)])
+        attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
         self.assertEqual(self.check()["readiness"], "ready")
         check["source_ids"].remove(ref)
         base_ref = "coverage-small_models"
