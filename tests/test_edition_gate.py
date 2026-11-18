@@ -2,6 +2,7 @@
 import hashlib
 import json
 import unittest
+from copy import deepcopy
 
 from ai_brief.contracts import RESOURCE_ROOT
 from ai_brief.research_audit import PAGE_CHECKS
@@ -54,6 +55,19 @@ class CompleteEditionTests(unittest.TestCase):
         failed = layered.LayeredBudgetTests.failed(case, kind="transport")
         failed["attempt_records"][0].update(status="failed", error=failed["error"])
         output, original, call = case.retained_detail_resolution()
+        status = next(r for r in case.audit["status_entries"] if r["event_key"] == "status-small-model-status")
+        entry = next(r for r in case.draft["entries"] if r["event_key"] == status["event_key"])
+        source = next(s for s in case.audit["sources"] if s["id"] == "coverage-glm_blog")
+        status["source_ids"], entry["source_urls"] = [source["id"]], [source["url"]]
+        output["findings"] = {"page_status_sources": {"small-model-status": [
+            dict(source_id=source["id"], url=source["url"], content_sha256=source["content_sha256"])]}}
+        body = case.root / "evidence" / (source["id"] + ".txt")
+        archived = body.with_name(source["content_sha256"] + ".txt")
+        archived.write_bytes(body.read_bytes())
+        body.write_bytes(b"Updated official response")
+        source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"]*2,
+                      content_sha256=hashlib.sha256(body.read_bytes()).hexdigest(), retrieved_at="2026-11-06T07:24:00+08:00")
         case.bind_retained_output(output, original, call)
         result = case.check()
         self.assertEqual(result["readiness"], "partial")
@@ -165,6 +179,14 @@ class CompleteEditionTests(unittest.TestCase):
         self.assertIn("complete_edition_required", self.check()["blockers"])
         self.draft["schema_version"] = "1.0"
         self.assertEqual(self.check()["readiness"], "ready")
+        alternate = deepcopy(next(s for s in self.audit["sources"] if s["id"] == "source"))
+        alternate.update(id="other-read", content_sha256=hashlib.sha256(b"Other response").hexdigest())
+        (self.root / "evidence/other-read.txt").write_bytes(b"Other response")
+        self.audit["sources"].append(alternate)
+        refs[refs.index("source")] = "other-read"
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        refs[refs.index("other-read")] = "source"
+        self.audit["sources"].remove(alternate)
         self.draft["revision_notice"] = {}
         self.assertIn("complete_edition_required", self.check()["blockers"])
         self.draft.pop("revision_notice")

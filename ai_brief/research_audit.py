@@ -713,7 +713,7 @@ def _validate_audit(directory):
             else:
                 blockers.append("required_coverage_incomplete")
 
-    calls, retained_sources, retained_source_text, prior_checks = {}, {}, {}, {}
+    calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, {}, {}, {}
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
@@ -896,7 +896,7 @@ def _validate_audit(directory):
         key = candidate["event_key"]
         _require(key not in by_event, "Duplicate candidate event key")
         by_event[key] = candidate
-    decisions = {}
+    decisions, candidate_reads = {}, {}
     for decision in metadata["decisions"]:
         key = decision["event_key"]
         _require(key in by_event and key not in decisions, "Each decision must name one unique candidate")
@@ -914,7 +914,8 @@ def _validate_audit(directory):
                     and _time(s["published_at"]) == _time(candidate["published_at"])
                     and _time(s["retrieved_at"]) == _time(candidate["retrieved_at"])]
         _require(bool(matching), "Candidate needs matching publication, retrieval and source evidence")
-        _require(any(candidate["evidence"] in text for _, text in matching), "Candidate evidence must occur in the retained source text")
+        candidate_reads[key] = {(s["id"], s["content_sha256"]) for s, text in matching if candidate["evidence"] in text}
+        _require(bool(candidate_reads[key]), "Candidate evidence must occur in the retained source text")
         if decision["disposition"] in {"duplicate", "update"}:
             _require(bool(decision["history_entry_ids"]), "Duplicate/update decisions require history entry references")
         if decision["disposition"] == "update":
@@ -971,18 +972,22 @@ def _validate_audit(directory):
                  "Coverage status requires successful source evidence")
         status_entries[key] = entry
     first_edition = previous_report is None and require_complete_first
-    topic_urls, discovered_urls = {}, {}
+    topic_reads, discovered_reads = {}, {}
     handoff = None
     if first_edition:
         for page, checks in page_checks.items():
-            topic_urls[page] = {sources[ref]["url"] for table in (metadata["checks"], prior_checks)
+            topic_reads[page] = {(ref, records[ref]["content_sha256"])
+                                for table, records in ((metadata["checks"], sources), (prior_checks, retained_sources))
                                 for check in checks for ref in table.get(check, {}).get("source_ids", ())
-                                if check in community.CHECKS or source_matches(check, sources[ref]["url"])}
-        for query in metadata.get("discovery", {}).get("queries", []):
-            for result in query["results"]:
-                if result["disposition"] in SELECTED:
-                    discovered_urls.setdefault((query["family"], result["event_key"]), set()).update(
-                        sources[ref]["url"] for ref in result["source_ids"])
+                                if community.executed_source_status(records[ref]) == "ok"
+                                and (check in community.CHECKS or source_matches(check, records[ref]["url"]))}
+        for discovery, records in ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources)):
+            for query in discovery.get("queries", []):
+                for result in query["results"]:
+                    if result["disposition"] in SELECTED:
+                        discovered_reads.setdefault((query["family"], result["event_key"]), set()).update(
+                            (ref, records[ref]["content_sha256"]) for ref in result["source_ids"]
+                            if community.executed_source_status(records[ref]) == "ok")
     supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]
     if draft_sha is None:
@@ -1035,31 +1040,34 @@ def _validate_audit(directory):
                      "Draft sources differ from retained candidate evidence")
             if first_edition:
                 page = entry.get("article_id")
-                if not isinstance(page, str) or page not in topic_urls:
+                if not isinstance(page, str) or page not in topic_reads:
                     supported_entries = False
                 else:
                     status = key in status_entries
-                    needed = set(urls) if status else {by_event[key]["source_url"]}
-                    allowed = set(topic_urls[page])
+                    allowed = set(topic_reads[page])
                     for check in page_checks[page]:
-                        allowed.update(discovered_urls.get((check, key), ()))
-                    if not status or not needed <= allowed:
-                        if handoff is None:
-                            handoff = _topic_handoff(calls.get("research"), read)
-                        if status:
-                            for item in handoff.get("page_status_sources", {}).get(page, []):
-                                if isinstance(item, dict) and item.get("source_id") in binding["source_ids"]:
-                                    ref = sources[item["source_id"]]
-                                    if (ref["url"], ref["content_sha256"]) == (item.get("url"), item.get("content_sha256")):
-                                        allowed.add(ref["url"])
-                        else:
-                            assignments = [item for item in handoff.get("candidate_bindings_and_decisions", [])
-                                           if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
-                            if assignments:
-                                allowed = {sources[item["primary_source_id"]]["url"] for item in assignments
-                                           if item.get("primary_source_id") in binding["source_ids"]}
-                                supported_entries &= all(item["article_id"] == page for item in assignments)
-                    supported_entries &= needed <= allowed
+                        allowed.update(discovered_reads.get((check, key), ()))
+                    if handoff is None:
+                        handoff = _topic_handoff(calls.get("research"), read)
+                    if status:
+                        for item in handoff.get("page_status_sources", {}).get(page, []):
+                            if not isinstance(item, dict) or item.get("source_id") not in binding["source_ids"]:
+                                continue
+                            ref = item["source_id"]
+                            for records in (sources, retained_sources):
+                                version = records.get(ref)
+                                if (version and community.executed_source_status(version) == "ok"
+                                        and (version["url"], version["content_sha256"]) == (item.get("url"), item.get("content_sha256"))):
+                                    allowed.add((ref, version["content_sha256"]))
+                        supported_entries &= set(urls) <= {sources[ref]["url"] for ref, _ in allowed if ref in binding["source_ids"]}
+                    else:
+                        assignments = [item for item in handoff.get("candidate_bindings_and_decisions", [])
+                                       if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
+                        if assignments:
+                            primary_ids = {item["primary_source_id"] for item in assignments if item.get("primary_source_id") in binding["source_ids"]}
+                            allowed = {record for record in candidate_reads[key] if record[0] in primary_ids}
+                            supported_entries &= all(item["article_id"] == page for item in assignments)
+                        supported_entries &= bool(candidate_reads[key] & allowed)
             if key in decisions and decisions[key]["disposition"] == "update":
                 _require(entry.get("update_of") in decisions[key]["history_entry_ids"], "Draft update must preserve its history relationship")
             else:

@@ -236,6 +236,13 @@ class ArticleDeliveryTests(unittest.TestCase):
         partial = n.build_manifest(dict(data, articles=data["articles"][:1]), PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
         complete = n.build_manifest(data, PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
         receiver = self.receiver(expected=partial)
+        self.slack.messages = [{"type":"message","user":NOTICE_CONFIG["sender_id"],"ts":ts(1),
+                                "text":"AI Infra 晨报 · 2026-11-19\n\n"+partial["articles"][0]["url"]}]
+        with patch("builtins.print") as log:
+            receiver.poll()
+        self.assertEqual(json.loads(log.call_args.args[0])["event"], "verified_notice_required")
+        self.assertEqual(self.wecom.sent, [])
+        receiver = self.receiver(expected=partial)
         self.slack.messages = [message(1, partial)]
         with patch("builtins.print") as log:
             receiver.poll()

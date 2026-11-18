@@ -912,6 +912,17 @@ class Relay:
                 if row[0] != digest(intent):
                     raise RelayError("request_id_conflict", 409)
                 return self.store.status(request_id)
+            # 旧发送者提供自由文本，无法核对发布清单。新晨报统一经已验证的通知入口。
+            title = text.lstrip().split("\n", 1)[0]
+            if not edition and TITLE.search(title):
+                observed = float(timestamp) if timestamp else self.clock()
+                day = time.strftime("%Y-%m-%d", time.gmtime(observed + 8 * 3600))
+                stated = re.search(r"\b20\d{2}-\d{2}-\d{2}\b", title)
+                if max(day, stated.group() if stated else day) >= notice_format.COMPLETE_EDITION_FROM:
+                    if mode == "auto":
+                        print(json.dumps({"event":"verified_notice_required","message_ts":timestamp}), flush=True)
+                        return {"status":"rejected","error":"verified_notice_required"}
+                    raise RelayError("verified_notice_required", 409)
             edition_request = (self.store.get(day_key) if day_key else None) or (self.store.get(edition) if edition else None)
             if repeat and edition:
                 for table in ('scheduled_notices', 'scheduled_revision_notices'):

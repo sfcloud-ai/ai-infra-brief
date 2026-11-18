@@ -159,10 +159,13 @@ def parse_article_text(text, base):
             "index_url": f"{base}{day}/" if stable else f"{base}{day}/r{revision}/"}
 
 
+COMPLETE_EDITION_FROM = "2026-11-19"
+
+
 def validate_first_notice(plan, base):
     """从整期首发启用日开始，核对真正首次通知的日期及文章清单。"""
     day = plan["report_date"]
-    if day < "2026-11-19":
+    if day < COMPLETE_EDITION_FROM:
         return
     try:
         notice = parse_article_text(plan["text"], base)
