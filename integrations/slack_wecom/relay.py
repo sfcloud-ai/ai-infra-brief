@@ -764,7 +764,7 @@ class Relay:
             if profile is not None and saved is None:
                 store.set("notice_connector_v1", expected)
 
-    def notice(self, message):
+    def notice(self, message, *, automatic=False):
         profile = self.config.get("notice_connector")
         if profile is None or message.get("user") != profile["user_id"]:
             return None
@@ -774,6 +774,17 @@ class Relay:
                 return candidate
             key = digest(message)
             if key not in self._notice_cache:
+                day = notice_url_day(candidate["url"], profile, allow_current=True)
+                try:
+                    notice_format.validate_first_notice({"report_date":day, "notice_key":candidate["url"], "text":candidate["text"]},
+                                                        profile["report_base_url"])
+                except notice_format.FirstNoticeIncomplete:
+                    scope = [self.config["team_id"], self.config["channel_id"]]
+                    day_key = "notice_day:" + digest([*scope, day])
+                    edition_key = "notice_edition:" + digest([*scope, candidate["url"]])
+                    owners = (self.store.get("started:" + day_key), self.store.get(day_key) or self.store.get(edition_key))
+                    if not any(self.store.delivery_started(owner) for owner in owners):
+                        raise
                 # 读取失败在游标推进及投递写入之前向外传播。
                 manifest = self.notice_reader.read(candidate)
                 verified = _bind_notice_manifest(candidate, manifest, profile)
@@ -781,6 +792,12 @@ class Relay:
                     self._notice_cache.pop(next(iter(self._notice_cache)))
                 self._notice_cache[key] = verified
             return self._notice_cache[key]
+        except notice_format.FirstNoticeIncomplete as exc:
+            if automatic:
+                print(json.dumps({"event":"first_notice_requires_all_six_articles","report_date":day,
+                                  "message_ts":message.get("ts")}), flush=True)
+                return None
+            raise RelayError("first_notice_requires_all_six_articles", 409) from exc
         except RelayError:
             return None
 
@@ -803,7 +820,7 @@ class Relay:
     def is_brief(self, message):
         profile = self.config.get("notice_connector")
         if profile is not None and message.get("user") == profile["user_id"]:
-            return self.notice(message) is not None
+            return self.notice(message, automatic=True) is not None
         text = message_text(message)
         subtype = message.get("subtype")
         return (message.get("user") == self.config["sender_id"]

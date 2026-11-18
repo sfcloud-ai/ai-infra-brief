@@ -83,10 +83,10 @@ def _topic_handoff(call, read):
         matches = [result["output_sha256"]]
     if not matches:
         return {}
-    statuses = ["ok" if result[name] == "success" else result[name] for name in ("stage_status", "status") if name in result]
+    status = result.get("stage_status", result.get("status"))
     _require(hashlib.sha256(raw).hexdigest() == digest and result.get("stage") == "research"
-             and result.get("input_sha256") == attempt["input_sha256"] and statuses
-             and all(s == attempt["status"] == call["status"] for s in statuses)
+             and result.get("input_sha256") == attempt["input_sha256"]
+             and ("ok" if status == "success" else status) == attempt["status"] == call["status"]
              and "elapsed_seconds" in result and result["elapsed_seconds"] == attempt["elapsed_seconds"]
              and len(matches) == 1 and isinstance(matches[0], str) and re.fullmatch(r"[a-f0-9]{64}", matches[0]),
              "Research findings must match the settled research attempt")
@@ -100,6 +100,24 @@ def _topic_handoff(call, read):
              and all(page in PAGE_CHECKS and isinstance(items, list) for page, items in findings.get("page_status_sources", {}).items()),
              "Invalid research topic handoff")
     return findings
+
+
+def _assigned_primary_matches(assignment, findings, url, reads):
+    source_id = assignment.get("primary_source_id")
+    if not isinstance(source_id, str):
+        return False
+    records = findings.get("source_records", findings.get("sources", []))
+    if isinstance(records, dict):
+        records = [records[source_id]] if source_id in records else []
+    elif isinstance(records, list):
+        records = [r for r in records if isinstance(r, dict) and r.get("source_id", r.get("id")) == source_id]
+    else:
+        return False
+    if "url" in assignment or "content_sha256" in assignment:
+        records = [*records, assignment]
+    return bool(records) and all(isinstance(r, dict) and r.get("url") == url
+                                 and isinstance(r.get("content_sha256", r.get("body_sha256")), str)
+                                 and (source_id, r.get("content_sha256", r.get("body_sha256"))) in reads for r in records)
 
 
 def _time(value):
@@ -1064,10 +1082,10 @@ def _validate_audit(directory):
                         assignments = [item for item in handoff.get("candidate_bindings_and_decisions", [])
                                        if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
                         if assignments:
-                            primary_ids = {item["primary_source_id"] for item in assignments if item.get("primary_source_id") in binding["source_ids"]}
-                            allowed = {record for record in candidate_reads[key] if record[0] in primary_ids}
-                            supported_entries &= all(item["article_id"] == page for item in assignments)
-                        supported_entries &= bool(candidate_reads[key] & allowed)
+                            supported_entries &= all(item["article_id"] == page and _assigned_primary_matches(
+                                item, handoff, by_event[key]["source_url"], candidate_reads[key]) for item in assignments)
+                        else:
+                            supported_entries &= bool(candidate_reads[key] & allowed)
             if key in decisions and decisions[key]["disposition"] == "update":
                 _require(entry.get("update_of") in decisions[key]["history_entry_ids"], "Draft update must preserve its history relationship")
             else:

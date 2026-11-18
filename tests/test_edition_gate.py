@@ -5,7 +5,7 @@ import unittest
 from copy import deepcopy
 
 from ai_brief.contracts import RESOURCE_ROOT
-from ai_brief.research_audit import PAGE_CHECKS
+from ai_brief.research_audit import PAGE_CHECKS, _topic_handoff
 from ai_brief.storage import BriefError
 from tests import test_community_discovery as community
 from tests import test_layered_budget as layered
@@ -207,7 +207,9 @@ class CompleteEditionTests(unittest.TestCase):
         attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
         self.assertEqual(self.check()["readiness"], "ready")
         entry = self.draft["entries"][0]
-        assignment = dict(article_id="inference-engines", event_key=entry["event_key"], primary_source_id="source")
+        primary = next(src for src in self.audit["sources"] if src["id"] == "source")
+        assignment = dict(article_id="inference-engines", event_key=entry["event_key"], primary_source_id="source",
+                          url=primary["url"], content_sha256=primary["content_sha256"])
         findings["candidate_bindings_and_decisions"] = [assignment]
         def bind_findings():
             result["outputs"][0]["sha256"] = self.artifact(original_audit.encoded(findings))
@@ -217,6 +219,15 @@ class CompleteEditionTests(unittest.TestCase):
         assignment["article_id"] = entry["article_id"]
         bind_findings()
         self.assertEqual(self.check()["readiness"], "ready")
+        for field, other in (("url", official["url"]), ("content_sha256", "a" * 64)):
+            assignment[field] = other
+            bind_findings()
+            self.assertIn("complete_edition_required", self.check()["blockers"])
+            assignment[field] = primary[field]
+        result["stage_status"] = attempt["status"] = call["status"] = "partial"
+        bind_findings()
+        self.assertEqual(_topic_handoff(call, lambda name, limit: (self.root / name).read_bytes()), findings)
+        attempt["status"] = call["status"] = "ok"
         result["stage_status"] = "failed"
         bind_findings()
         with self.assertRaisesRegex(BriefError, "match the settled research attempt"):

@@ -242,13 +242,14 @@ class ArticleDeliveryTests(unittest.TestCase):
             receiver.poll()
         self.assertEqual(json.loads(log.call_args.args[0])["event"], "verified_notice_required")
         self.assertEqual(self.wecom.sent, [])
-        receiver = self.receiver(expected=partial)
+        receiver = self.receiver(expected=partial, fail_first=True)
         self.slack.messages = [message(1, partial)]
         with patch("builtins.print") as log:
             receiver.poll()
         record = json.loads(log.call_args.args[0])
         self.assertEqual(record, {"event":"first_notice_requires_all_six_articles","report_date":day,"message_ts":ts(1)})
         self.assertEqual(self.store.get("cursor"), ts(1))
+        self.assertEqual(self.reader.calls, 0)
         self.assertEqual(self.wecom.sent, [])
         self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", ("auto:"+ts(1),)).fetchone())
         receiver = self.receiver(expected=complete)
