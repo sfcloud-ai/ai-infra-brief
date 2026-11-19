@@ -290,6 +290,17 @@ class CompleteEditionTests(unittest.TestCase):
         assignment["article_id"] = entry["article_id"]
         bind_findings()
         self.assertEqual(self.check()["readiness"], "ready")
+        assignment.pop("url")
+        assignment["body_sha256"] = assignment.pop("content_sha256")
+        findings["source_records"] = {"source": {"body_sha256": primary["content_sha256"]}}
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        findings["source_records"]["source"]["body_sha256"] = "f" * 64
+        bind_findings()
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        del findings["source_records"]
+        assignment["content_sha256"] = assignment.pop("body_sha256")
+        assignment["url"] = primary["url"]
         descriptor = result["outputs"][0]
         descriptor["path"] = "research/outputs/" + descriptor.pop("name")
         bind_findings()

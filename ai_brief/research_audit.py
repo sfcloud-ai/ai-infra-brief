@@ -119,7 +119,7 @@ def _settled_research(call, read):
     return findings, snapshot
 
 
-def _assigned_primary_matches(assignment, findings, url, reads):
+def _assigned_primary_matches(assignment, findings, url, reads, settled_sources):
     source_id = assignment.get("primary_source_id")
     if not isinstance(source_id, str):
         return False
@@ -130,11 +130,16 @@ def _assigned_primary_matches(assignment, findings, url, reads):
         records = [r for r in records if isinstance(r, dict) and r.get("source_id", r.get("id")) == source_id]
     else:
         return False
-    if "url" in assignment or "content_sha256" in assignment:
-        records = [*records, assignment]
-    return bool(records) and all(isinstance(r, dict) and r.get("url") == url
-                                 and isinstance(r.get("content_sha256", r.get("body_sha256")), str)
-                                 and (source_id, r.get("content_sha256", r.get("body_sha256"))) in reads for r in records)
+    records.append(assignment)
+    if source_id in settled_sources:
+        records.append(settled_sources[source_id])
+    # 原生操作回执保留 body_sha256，URL 保存在同一研究结算的 sources 表中。
+    if not all(isinstance(record, dict) for record in records):
+        return False
+    urls = [record["url"] for record in records if "url" in record]
+    hashes = [record[key] for record in records for key in ("content_sha256", "body_sha256") if key in record]
+    return bool(urls and hashes) and all(value == url for value in urls) and all(
+        isinstance(value, str) and value == hashes[0] for value in hashes) and (source_id, hashes[0]) in reads
 
 
 def _time(value):
@@ -1152,7 +1157,7 @@ def _validate_audit(directory):
                                        if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
                         if assignments:
                             supported_entries &= all(item["article_id"] == page and _assigned_primary_matches(
-                                item, handoff, by_event[key]["source_url"], candidate_reads[key]) for item in assignments)
+                                item, handoff, by_event[key]["source_url"], candidate_reads[key], retained_sources) for item in assignments)
                         else:
                             supported_entries &= bool(candidate_reads[key] & allowed)
             if key in decisions and decisions[key]["disposition"] == "update":
