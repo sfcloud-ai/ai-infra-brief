@@ -1,4 +1,4 @@
-"""Read original source receipts and prepare the next bounded research batch."""
+"""从原始来源回执生成下一批受预算约束的读取请求。"""
 from collections import defaultdict
 from datetime import datetime
 from email.message import Message
@@ -104,7 +104,7 @@ def same_listing(original, followup):
         return True
     if not (first[:2] == second[:2] == ("https", "api.github.com") and first[3] == second[3]):
         return False
-    # GitHub emits numeric repository/organization paths in its own Link header.
+    # GitHub 在响应头中用数字 ID 表示仓库或组织。
     for named, numeric in ((r"/repos/[^/]+/[^/]+", r"/repositories/[0-9]+"), (r"/orgs/[^/]+", r"/organizations/[0-9]+")):
         a, b = re.fullmatch(named + r"(/.*)", first[2]), re.fullmatch(numeric + r"(/.*)", second[2])
         if a and b and a[1] == b[1]:
@@ -131,7 +131,7 @@ def github_events(url, body):
 
 
 def source_followup(ledger_path, operations_dir, since):
-    """Propose GET identities from original receipts. The existing grant authorizes each actual read."""
+    """从已结算回执生成 GET 身份，实际读取沿用原请求授权。"""
     try:
         return _source_followup(ledger_path, operations_dir, since)
     except PreflightError:
