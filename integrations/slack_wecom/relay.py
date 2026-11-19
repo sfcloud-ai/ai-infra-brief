@@ -108,6 +108,12 @@ def load_config(root):
     return config
 
 
+def require_notice_ingress(config, *, scheduled=False):
+    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+    if day >= notice_format.COMPLETE_EDITION_FROM and not (scheduled or config.get("notice_connector")):
+        raise RelayError("notice_connector_or_scheduler_required", 500)
+
+
 def validate_notice_connector(profile):
     """固定一个用户授权的 App，同时保留原晨报发送者。"""
     keys = {"user_id", "app_id", "attribution_text", "report_base_url", "not_before"}
@@ -1232,6 +1238,7 @@ def main():
         connection.close()
         return
     config = load_config(args.root)
+    require_notice_ingress(config)
     with exclusive(args.root):
         secrets = load_secrets(args.root)
         slack = Slack(secrets["slack_user_token"], config)

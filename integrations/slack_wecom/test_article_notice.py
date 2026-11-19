@@ -229,6 +229,13 @@ class ManifestReadTests(unittest.TestCase):
 
 
 class ArticleDeliveryTests(unittest.TestCase):
+    def test_verified_ingress_required_before_starting_a_standalone_relay(self):
+        with patch.object(r.time, "time", return_value=1795104000):
+            with self.assertRaisesRegex(r.RelayError, "notice_connector_or_scheduler_required"):
+                r.require_notice_ingress({})
+            r.require_notice_ingress({"notice_connector": PROFILE})
+            r.require_notice_ingress({}, scheduled=True)
+
     def test_connector_allows_the_complete_first_notice_after_rejecting_a_partial_one(self):
         day = "2026-11-19"
         data = report()

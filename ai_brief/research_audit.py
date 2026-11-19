@@ -1004,20 +1004,39 @@ def _validate_audit(directory):
     topic_reads, discovered_reads = {}, {}
     handoff = None
     if first_edition:
+        check_tables = ((metadata["checks"], sources), (prior_checks, retained_sources))
+        discovery_tables = ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources))
+        research = calls.get("research")
+        if research and research["status"] == "partial" and not prior_checks:
+            handoff = _topic_handoff(research, read)
+            originals = handoff.get("sources", [])
+            _require(isinstance(originals, list), "Original research sources must be a list")
+            bound = {}
+            for original in originals:
+                if not isinstance(original, dict) or not isinstance(original.get("id"), str):
+                    continue
+                ref = original["id"]
+                current = sources.get(ref)
+                if (current and original.get("status") == "ok" and original.get("url") == current["url"]
+                        and original.get("content_sha256") == current["content_sha256"]):
+                    bound[ref] = current
+            checks, discovery = handoff.get("checks", {}), handoff.get("discovery", {})
+            _require(isinstance(checks, dict) and isinstance(discovery, dict), "Invalid settled topic evidence")
+            check_tables, discovery_tables = ((checks, bound),), ((discovery, bound),)
         for page, checks in page_checks.items():
             topic_reads[page] = {(ref, records[ref]["content_sha256"])
-                                for table, records in ((metadata["checks"], sources), (prior_checks, retained_sources))
+                                for table, records in check_tables
                                 for check in checks for ref in table.get(check, {}).get("source_ids", ())
-                                if community.executed_source_status(records[ref]) == "ok"
+                                if ref in records and community.executed_source_status(records[ref]) == "ok"
                                 and (not prior_checks or table is prior_checks or (check, ref) in resolved_topic_reads)
                                 and (check in community.CHECKS or source_matches(check, records[ref]["url"]))}
-        for discovery, records in ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources)):
+        for discovery, records in discovery_tables:
             for query in discovery.get("queries", []):
                 for result in query["results"]:
                     if result["disposition"] in SELECTED:
                         discovered_reads.setdefault((query["family"], result["event_key"]), set()).update(
                             (ref, records[ref]["content_sha256"]) for ref in result["source_ids"]
-                            if community.executed_source_status(records[ref]) == "ok"
+                            if ref in records and community.executed_source_status(records[ref]) == "ok"
                             and (not prior_checks or discovery is prior_discovery or (query["family"], ref) in resolved_topic_reads))
     supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]

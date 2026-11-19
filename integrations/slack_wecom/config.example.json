@@ -4,5 +4,12 @@
   "channel_id": "DEXAMPLE",
   "sender_id": "USENDER",
   "poll_seconds": 60,
-  "forward_images": false
+  "forward_images": true,
+  "notice_connector": {
+    "user_id": "UEXAMPLE",
+    "app_id": "AEXAMPLE",
+    "attribution_text": "*Codex* <@UEXAMPLE>",
+    "report_base_url": "https://example.org/reports/",
+    "not_before": "1795017600.000000"
+  }
 }

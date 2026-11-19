@@ -104,6 +104,8 @@ class CompleteEditionTests(unittest.TestCase):
         case.bind_retained_output(output, result, call)
         case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
         self.assertIn("complete_edition_required", case.check()["blockers"])
+        del call["coverage_resolution"]
+        self.assertIn("complete_edition_required", case.check()["blockers"])
 
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
         case = self.discovery_edition()

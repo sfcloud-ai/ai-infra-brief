@@ -341,6 +341,7 @@ def serve(module, root, release, activation_file=None, scheduler_config=None):
         else:
             from scheduled_runtime import ScheduledRuntime, load_config as load_scheduled_config
         scheduled_options = load_scheduled_config(scheduler_config)
+    module.require_notice_ingress(config, scheduled=scheduled_options is not None)
     with module.exclusive(root):
         credentials = module.load_secrets(root)
         slack = module.Slack(credentials["slack_user_token"], config)
