@@ -83,7 +83,7 @@
 
 - 每期分别检查 DeepSeek、Qwen、GLM/Z.ai 的官方模型发布渠道：官网的新闻/发布页和技术博客、官方 GitHub 项目/release，以及官方 Hugging Face/ModelScope 权重和配置。官方社交公告用于交叉核对发布事实和时间，账号归属须从官网或已确认官方项目验证，不把同名账号或第三方镜像当官方。博客检查、发布公告检查和权重检查不能互相替代。
 - 从本目录的厂商官网和官方组织入口继续定位当前发布渠道；渠道迁移、动态空壳、接口分页不全时核对其他官方入口，记录实际范围，不以一个旧列表证明没有新发布。不存在或未确认的渠道明确记为未知，不猜 URL。
-- Qwen 的 [Research](https://qwen.ai/research) 可能返回 JavaScript 外壳。按本期获准的读取方式获取渲染后的列表和文章，再交叉核对阿里云新闻稿。已知路径示例是 [Qwen4-Max 文章](https://qwen.ai/blog?id=qwen4-max) 和[对应官方新闻稿](https://www.alibabacloud.com/en/press-room/alibaba-unveils-qwen4-max)。历史页面提供发现路径，每期都要取得能覆盖本窗口的原始记录。
+- Qwen 的 [Research](https://qwen.ai/research) 可能返回 JavaScript 外壳。[官方英文文章接口](https://qwen.ai/api/v2/article/retrieval?language=en-US&type=qwen_ai) 返回列表与正文。按本期原始响应核对条目、正文和时间，中文文章及未能定时的记录分别注明范围。可用 [Qwen4-Max 文章](https://qwen.ai/blog?id=qwen4-max) 和[对应官方新闻稿](https://www.alibabacloud.com/en/press-room/alibaba-unveils-qwen4-max) 交叉核对具体事件。
 - GLM 的博客入口失效或站点地图只列服务页面时，接着读取[智谱研究](https://www.zhipuai.cn/zh/research)和[官方更新记录](https://docs.z.ai/release-notes/new-released.md)。分别记录最新可见条目和可核验的范围；单篇旧文章不能补齐当期公告覆盖。
 - 权重渠道逐家分页。Hugging Face 的 author 分别为 zai-org、deepseek-ai、Qwen，沿响应的下一页链接直到本窗口下界或列表结束，记录排序字段、页数和终止依据。lastModified 只反映公开模型的修改时间。ModelScope 的官方 HubApi.list_models 通过 PUT https://modelscope.cn/api/v1/models/ 查询，Path 分别为 ZhipuAI、deepseek-ai、Qwen，PageNumber 从 1 递增，PageSize 为 100。冻结的原生来源操作若只支持 GET，记录该列表的覆盖缺口和成功读取的其他渠道，保留原方法与预算。
 - 引擎文章若只标日历日且没有时区，保留原文日期、精度和可能覆盖的区间。跨过窗口边界的文章标明时间待核验；引用的 PR 合并时间另记为代码事件。成功取得正文的文章不计作网络失败。

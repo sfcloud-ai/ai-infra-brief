@@ -72,6 +72,7 @@ class RequiredCoverageTests(unittest.TestCase):
     def test_qwen_research_entry_and_articles_are_valid_audit_sources(self):
         source = next(s for s in self.audit["sources"] if s["id"] == "coverage-qwen_blog")
         for url in ("https://qwen.ai/research", "https://qwen.ai/research/",
+                    "https://qwen.ai/api/v2/article/retrieval?language=en-US&type=qwen_ai",
                     "https://www.qwen.ai/research/example", "https://qwen.ai/blog",
                     "https://qwenlm.github.io/blog/example"):
             source["url"] = url
@@ -80,6 +81,9 @@ class RequiredCoverageTests(unittest.TestCase):
         source["url"] = "https://qwen.ai/research"
         self.assertEqual(self.check()["readiness"], "partial")
         for url in ("https://qwen.ai/research-other", "https://qwen.ai/", "https://qwen.ai/chat",
+                    "https://qwen.ai/api/v2/article/retrieval?type=qwen_ai",
+                    "https://qwen.ai/api/v2/article/retrieval?type=qwen_ai&language=en-US&id=one",
+                    "https://qwen.ai.example/api/v2/article/retrieval?language=en-US&type=qwen_ai",
                     "https://qwen.ai.example/research", "https://qwenlm.github.io/research"):
             self.assertFalse(source_matches("qwen_blog", url), url)
         self.assertFalse(source_matches("glm_blog", "https://qwen.ai/research"))

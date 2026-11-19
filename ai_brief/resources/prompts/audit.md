@@ -199,6 +199,7 @@ v1.4 的研究阶段因真实来源缺口完成为 `partial/coverage_incomplete`
 
 - 证明包含真实当前 operation_id、原 reserve/settle command 与 control_observed receipt 的 SHA 引用，以及每项新增来源的 source_id/attempt_index 映射；已知当前结果也必须保留其原结算回执。所有原字节置于 `stage_artifacts/<sha256>.json`，离线自洽不能替代 Host 对真实账本的最终许可核验。
 - 输入 manifest 为 `model_prepublication_continuation_v1`，绑定原 result checkpoint、真实新增 evidence 和 payload。保留原输入原字节；payload 可仅列增量，但未列为新增的上下文必须与原输入一致，不得夹带未经证明的新来源。
+- 首稿带 `findings.json#/source_records` 时，续接归档和审计包都保留原编辑输入、其引用的研究结果和该结果声明的 findings.json 原字节。用三者的 SHA 核对来源数和原正文摘要，再比对增量。保留原读取记录和计时字段。
 - 当前轮次的 research 结果须声明并保留最终 candidates 文件，或现有包含 candidates 的真实研究输出；editor 结果须声明并保留最终 draft 原字节。失败后的同轮普通重试仍继承这些要求。后续已认证页面继续保留旧前缀，不用新稿覆写旧轮输出。
 - editor-only 续接不能新增研究候选；必须从旧 editor 输入所引用且确属已保留 research attempt 的结果核对候选 items（不限制 notes 等无关元信息）。两阶段都续接时，editor 需实际引用产生最终候选的新 research 结果。仅 research 续接时，旧 editor 已声明输出必须仍能证明最终 draft，否则需要新的 editor 工作。
 - 首次模型 attempt 的 recovery `checkpoint_sha256` 可为 null；run-level 归档 checkpoint 与模型恢复 checkpoint 不是同一字段。不得修改已冻结的历史前缀、原 result 内字段或账本。新续接必须指向真实上一模型 result，而不是擅自重写原输入。

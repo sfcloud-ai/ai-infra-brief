@@ -92,7 +92,8 @@ def verified_cutoff(url, body, next_urls, lower):
 
 
 OFFICIAL_ALTERNATIVES = {
-    "qwen.ai": ("https://qwen.ai/blog?id=qwen4-max",
+    "qwen.ai": ("https://qwen.ai/api/v2/article/retrieval?language=en-US&type=qwen_ai",
+                "https://qwen.ai/blog?id=qwen4-max",
                 "https://www.alibabacloud.com/en/press-room/alibaba-unveils-qwen4-max"),
     "z.ai": ("https://www.zhipuai.cn/zh/research", "https://docs.z.ai/release-notes/new-released.md"),
 }

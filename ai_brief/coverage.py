@@ -64,6 +64,8 @@ def source_matches(check, url):
     if check in repo:
         return github(repo[check])
     if check in {"vllm_blog", "sglang_blog", "lmsys_blog", "glm_blog", "qwen_blog"}:
+        if check == "qwen_blog" and parts.scheme == "https" and parts.netloc == "qwen.ai" and parts.path == "/api/v2/article/retrieval":
+            return not parts.fragment and parse_qs(parts.query, keep_blank_values=True) == {"language": ["en-US"], "type": ["qwen_ai"]}
         if check == "glm_blog" and (
             (host == "www.zhipuai.cn" and path == "/zh/research")
             or (host == "docs.z.ai" and path == "/release-notes/new-released.md")
