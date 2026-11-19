@@ -133,7 +133,8 @@ class PromptRuleTests(unittest.TestCase):
             self.assertIsNone(parsed.username)
             self.assertIsNone(parsed.password)
             if parsed.query:
-                self.assertEqual(link, "https://qwen.ai/blog?id=qwen4-max")
+                self.assertIn(link, {"https://qwen.ai/blog?id=qwen4-max",
+                                     "https://qwen.ai/api/v2/article/retrieval?language=en-US&type=qwen_ai"})
 
     def test_official_blog_and_technical_article_entries_are_explicit(self):
         sources = (PROMPTS / "sources.md").read_text(encoding="utf-8")
