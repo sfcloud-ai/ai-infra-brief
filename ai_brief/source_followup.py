@@ -71,12 +71,10 @@ def verified_cutoff(url, body, next_urls, lower):
         raise PreflightError("Pagination cutoff needs the original structured listing") from exc
     field = None
     if parts.hostname == "api.github.com" and re.fullmatch(r"/(?:repos/[^/]+/[^/]+|repositories/\d+)/pulls", parts.path):
-        ordering = params.get("sort", "created")
-        default_direction = "desc" if ordering == "created" else "asc"
-        if ordering in {"created", "updated"} and params.get("direction", default_direction) == "desc":
-            field = ordering + "_at"
+        if params.get("sort") == "updated" and params.get("direction") == "desc":
+            field = "updated_at"
     elif parts.hostname == "api.github.com" and parts.path == "/search/issues":
-        if (params.get("sort") in {"created", "updated"} and params.get("order", "desc") == "desc"
+        if (params.get("sort") == "updated" and params.get("order", "desc") == "desc"
                 and isinstance(rows, dict) and rows.get("incomplete_results") is False):
             field, rows = params["sort"] + "_at", rows.get("items")
     elif parts.hostname == "huggingface.co" and parts.path == "/api/models":
@@ -152,6 +150,7 @@ def _source_followup(ledger_path, operations_dir, since):
             "Source operation identity differs")
     attempted = {op["input_hash"] for op in ops.values()}
     observed, pages, candidates, bodies, events, gaps = {}, [], {}, defaultdict(list), defaultdict(set), []
+    numeric_paths = defaultdict(set)
     def propose(url, reason):
         identity = source_identity(url)
         if identity["hash"] not in attempted:
@@ -220,9 +219,24 @@ def _source_followup(ledger_path, operations_dir, since):
             if not same_listing(effective, link):
                 gaps.append({"operation_id": oid, "url": link, "reason": "listing_identity_changed"})
             else:
+                origin, target = urlsplit(effective), urlsplit(link)
+                if origin.hostname == "api.github.com" and target.path != origin.path:
+                    numeric_paths[target.path].add(origin.path)
+                if origin.hostname == "api.github.com" and origin.path in {"/search/issues", "/search/repositories"}:
+                    page = [v for k, v in parse_qsl(target.query, keep_blank_values=True) if k == "page"]
+                    if page not in (["1"], ["2"]):
+                        gaps.append({"operation_id": oid, "url": link, "reason": "discovery_page_limit"})
+                        continue
                 pages.append((oid, url_key(link), cutoff))
-    good = {url for url, ok in observed.values() if ok}
-    edges = {observed[oid][0]: url for oid, url, cutoff in pages if not cutoff}
+    def page_key(url):
+        parts = urlsplit(url)
+        names = numeric_paths.get(parts.path)
+        if parts.hostname == "api.github.com" and names and len(names) == 1:
+            return parts._replace(path=next(iter(names))).geturl()
+        return url
+    good = {page_key(url) for url, ok in observed.values() if ok}
+    observed_pages = {page_key(url) for url, ok in observed.values()}
+    edges = {page_key(observed[oid][0]): page_key(url) for oid, url, cutoff in pages if not cutoff}
     visited = set()
     for start in edges:
         page, trail = start, {}
@@ -232,12 +246,15 @@ def _source_followup(ledger_path, operations_dir, since):
         if page in trail:
             gaps.append({"urls": sorted(list(trail)[trail[page]:]), "reason": "pagination_cycle"})
         visited.update(trail)
+    proposed_pages = set()
     for oid, url, cutoff in pages:
-        if not cutoff and url not in good:
-            if source_identity(url)["hash"] in attempted:
+        key = page_key(url)
+        if not cutoff and key not in good:
+            if key in observed_pages or any(source_identity(candidate)["hash"] in attempted for candidate in {key, url}):
                 gaps.append({"operation_id": oid, "url": url, "reason": "next_response_unverified"})
-            else:
+            elif key not in proposed_pages:
                 propose(url, "pagination")
+                proposed_pages.add(key)
     for oid, op in ops.items():
         if op["phase"] != "acknowledged":
             gaps.append({"operation_id": oid, "reason": "source_operation_unsettled"})
@@ -248,4 +265,4 @@ def _source_followup(ledger_path, operations_dir, since):
             "identical_bodies": {key: ids for key, ids in bodies.items() if len(ids) > 1},
             "repeated_events": {key: sorted(ids) for key, ids in events.items() if len(ids) > 1},
             "pagination": [{"operation_id": oid, "next": url, "window_cutoff": cutoff,
-                            "next_read": url in good} for oid, url, cutoff in pages]}
+                            "next_read": page_key(url) in good} for oid, url, cutoff in pages]}

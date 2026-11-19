@@ -187,6 +187,14 @@ class CompleteEditionTests(unittest.TestCase):
         case.audit["checks"]["hardware"] = hardware
         case.reject("Invalid settled topic evidence")
 
+    def test_unused_settled_source_cannot_disappear_from_final_inventory(self):
+        case = self.discovery_edition()
+        unused = dict(deepcopy(case.audit["sources"][0]), id="unused-source", url="https://example.org/unused")
+        case.audit["sources"].append(unused)
+        self.settle_checks(case)
+        case.audit["sources"].pop()
+        case.reject("Settled source ID and URL must be preserved")
+
     def test_settled_discovery_cannot_credit_an_unrelated_source(self):
         case = self.discovery_edition()
         check = case.audit["checks"]["discovery_data_path"]

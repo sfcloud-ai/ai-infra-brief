@@ -67,6 +67,28 @@ class SourceFollowupTests(unittest.TestCase):
         with self.assertRaisesRegex(PreflightError, "scheduled run"):
             self.follow()
 
+    def test_numeric_next_link_matches_named_read_without_matching_other_repositories(self):
+        self.receipt(self.start, [self.article], self.next_page)
+        self.receipt(self.start.replace("/org/repo/", "/org/other/") + "&page=2", [self.article])
+        self.assertEqual(len(self.follow()["next_requests"]), 1)
+        self.receipt(self.start + "&page=2", [self.article])
+        self.assertTrue(self.follow()["pagination"][0]["next_read"])
+        self.assertEqual(self.follow()["next_requests"], [])
+
+    def test_creation_dates_do_not_close_a_pr_merge_window(self):
+        start = "https://api.github.com/repos/org/repo/pulls"
+        self.receipt(start, [{"created_at": "2026-10-01T00:00:00Z"}], start + "?page=2")
+        self.assertFalse(self.follow()["pagination"][0]["window_cutoff"])
+        self.assertEqual(len(self.follow()["next_requests"]), 1)
+
+    def test_discovery_links_stop_at_page_two(self):
+        for endpoint in ("issues", "repositories"):
+            base = f"https://api.github.com/search/{endpoint}?q=topic&per_page=20&page="
+            self.receipt(base + "2", {"items": [], "incomplete_results": True}, base + "3")
+        result = self.follow()
+        self.assertEqual(result["next_requests"], [])
+        self.assertEqual([g["reason"] for g in result["gaps"]], ["discovery_page_limit"] * 2)
+
     def test_failed_and_missing_pages_remain_gaps_and_official_alternates_need_reads(self):
         self.receipt(self.start, [self.article], self.next_page)
         self.receipt(self.next_page, [], status=403)

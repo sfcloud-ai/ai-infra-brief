@@ -965,8 +965,7 @@ def _validate_audit(directory):
             for original in originals:
                 ref, fingerprint = original["id"], original["content_sha256"]
                 current = sources.get(ref)
-                if not (current and current["url"] == original["url"]):
-                    continue
+                _require(current and current["url"] == original["url"], "Settled source ID and URL must be preserved")
                 attempts = original.get("attempt_records")
                 if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
                     raise BriefError("Settled source attempts must be preserved")
