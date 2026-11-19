@@ -47,9 +47,7 @@ class RevisionDelivery:
         return self.db.execute("SELECT file_id,content_hash,status,byte_size,ordinal FROM image_parts WHERE request_id=? ORDER BY ordinal", (request_id,)).fetchall()
 
     def started(self, request_id):
-        request = self.db.execute("SELECT status,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
-        return bool(request and (request[0] in {"sending", "sent", "unknown"} or request[1] > 0)
-                    or any(p[2] not in {"pending", "failed", "not_attempted"} for p in self.parts(request_id) + self.images(request_id)))
+        return self.parent.store.delivery_started(request_id)
 
     def status(self, request_id):
         row = self.row(request_id)
@@ -108,9 +106,10 @@ class RevisionDelivery:
                     raise ValueError("page_predecessor_receipt_incomplete")
             day_key = "notice_day:" + relay.digest([self.parent.config["team_id"], self.parent.config["channel_id"], day])
             day_owner = self.parent.store.get(day_key)
-            if day_owner and not original and not any(r[0] == day_owner for r in revisions) and not self.started(day_owner):
+            day_started = self.started(day_owner) or self.started(self.parent.store.get("started:" + day_key))
+            if day_owner and not original and not any(r[0] == day_owner for r in revisions) and not day_started:
                 raise ValueError("legacy_initial_reconciliation_required")
-            started = (bool(day_owner and self.started(day_owner))
+            started = (day_started
                        or bool(original and self.started(original[0]))
                        or any(self.started(row[0]) for row in revisions))
             covered = []
@@ -124,6 +123,8 @@ class RevisionDelivery:
             kind = "page_completion" if notice["kind"] == "page_completion" else "initial" if not started else "web_only" if effective["kind"] == "maintenance" else "revision_update"
             # 同一重要说明若已进入发送边界，后续版次不能借新 ID 重试未知结果。
             base = relay.validate_notice_connector(self.parent.config["notice_connector"])["report_base_url"]
+            if not started:
+                relay.notice_format.validate_first_notice(plan, base)
             text = plan["text"] if kind in {"initial", "page_completion"} else update_text(day, effective, base) if kind == "revision_update" else ""
             if kind == "revision_update" and any(phase in {"sending", "unknown"} and json.loads(encoded)["text"] == text for _, _, encoded, phase in revisions):
                 kind, text = "web_only", ""

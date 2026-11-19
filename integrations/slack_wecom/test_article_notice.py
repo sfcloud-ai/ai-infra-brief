@@ -229,6 +229,50 @@ class ManifestReadTests(unittest.TestCase):
 
 
 class ArticleDeliveryTests(unittest.TestCase):
+    def test_verified_ingress_required_before_starting_a_standalone_relay(self):
+        with patch.object(r.time, "time", return_value=1795104000):
+            with self.assertRaisesRegex(r.RelayError, "notice_connector_or_scheduler_required"):
+                r.require_notice_ingress({})
+            r.require_notice_ingress({"notice_connector": PROFILE})
+            r.require_notice_ingress({}, scheduled=True)
+
+    def test_connector_allows_the_complete_first_notice_after_rejecting_a_partial_one(self):
+        day = "2026-11-19"
+        data = report()
+        data.update(date=day, articles=[{"id":page, "title":page} for page in n.TOPICS])
+        partial = n.build_manifest(dict(data, articles=data["articles"][:1]), PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
+        complete = n.build_manifest(data, PROFILE["report_base_url"], "b"*64, COMMIT, stable=True)
+        receiver = self.receiver(expected=partial)
+        self.slack.messages = [{"type":"message","user":NOTICE_CONFIG["sender_id"],"ts":ts(1),
+                                "text":"AI Infra 晨报 · 2026-11-19\n\n"+partial["articles"][0]["url"]}]
+        with patch("builtins.print") as log:
+            receiver.poll()
+        self.assertEqual(json.loads(log.call_args.args[0])["event"], "verified_notice_required")
+        self.assertEqual(self.wecom.sent, [])
+        receiver = self.receiver(expected=partial, fail_first=True)
+        self.slack.messages = [message(1, partial)]
+        with patch("builtins.print") as log:
+            receiver.poll()
+        record = json.loads(log.call_args.args[0])
+        self.assertEqual(record, {"event":"first_notice_requires_all_six_articles","report_date":day,"message_ts":ts(1)})
+        self.assertEqual(self.store.get("cursor"), ts(1))
+        self.assertEqual(self.reader.calls, 0)
+        self.assertEqual(self.wecom.sent, [])
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM requests WHERE id=?", ("auto:"+ts(1),)).fetchone())
+        receiver = self.receiver(expected=complete)
+        self.slack.messages = [message(2, complete)]
+        receiver.poll()
+        self.assertEqual((len(self.wecom.sent),len(self.images)),(1,1))
+        receiver = self.receiver(expected=partial)
+        self.slack.messages = [message(3, partial)]
+        correction = {"request_id":"correction-one","message_ts":ts(3),"allow_repeat":True,"reason":"correct original notice"}
+        self.slack.download_image = lambda plan: b"invalid"
+        self.assertEqual(receiver.dispatch("/manual/slack-message", correction, os.getuid())["status"], "failed")
+        self.slack.download_image = lambda plan: PNG
+        retry = dict(correction, request_id="correction-two")
+        self.assertEqual(receiver.dispatch("/manual/slack-message", retry, os.getuid())["status"], "sent")
+        self.assertEqual((len(self.wecom.sent),len(self.images)),(2,2))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         state = Path(self.temp.name) / "state"; state.mkdir(mode=0o700)

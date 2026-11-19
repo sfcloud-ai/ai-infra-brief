@@ -23,6 +23,7 @@ from .research_continuation import validate_continuation, validate_current_outpu
 LAYERED_TIME_TOLERANCE = 1e-6
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
+WHOLE_EDITION_PACKAGE_BYTES = 32_000_000
 SELECTED = {"selected", "update"}
 PAGE_CHECKS = {
     "model-serving-gpu": ("model_serving",),
@@ -65,6 +66,81 @@ def _require(condition, message):
         raise BriefError(message)
 
 
+def _settled_research(call, read):
+    """读取同一次结算中的专题交接及覆盖快照，各自校验原件摘要。"""
+    if not call or call["status"] not in {"ok", "partial"} or not call.get("attempt_records"):
+        return {}, {}
+    attempt = call["attempt_records"][-1]
+    digest = attempt.get("result_sha256")
+    if not digest:
+        return {}, {}
+    raw = read(f"stage_artifacts/{digest}.json", MAX_PACKAGE_BYTES)
+    result = _json(raw, "research result")
+    if not isinstance(result, dict) or not isinstance(result.get("outputs", []), list):
+        return {}, {}
+    matches = []
+    for item in result.get("outputs", []):
+        if not isinstance(item, dict):
+            continue
+        labels = [item[k].replace("\\", "/").rsplit("/", 1)[-1] for k in ("name", "path") if isinstance(item.get(k), str)]
+        if "findings.json" in labels:
+            _require(all(label == "findings.json" for label in labels), "Conflicting research findings descriptor")
+            matches.append(item.get("sha256"))
+    if not matches and result.get("output_sha256"):
+        matches = [result["output_sha256"]]
+    if not matches:
+        return {}, {}
+    status = result.get("stage_status", result.get("status"))
+    _require(hashlib.sha256(raw).hexdigest() == digest and result.get("stage") == "research"
+             and result.get("input_sha256") == attempt["input_sha256"]
+             and ("ok" if status == "success" else status) == attempt["status"] == call["status"]
+             and "elapsed_seconds" in result and result["elapsed_seconds"] == attempt["elapsed_seconds"]
+             and len(matches) == 1 and isinstance(matches[0], str) and re.fullmatch(r"[a-f0-9]{64}", matches[0]),
+             "Research findings must match the settled research attempt")
+    data = read(f"stage_artifacts/{matches[0]}.json", MAX_PACKAGE_BYTES)
+    _require(hashlib.sha256(data).hexdigest() == matches[0], "Research findings fingerprint mismatch")
+    document = _json(data, "research findings")
+    snapshot = document
+    snapshot_sha = result.get("output_sha256")
+    if snapshot_sha is not None and snapshot_sha != matches[0]:
+        _require(isinstance(snapshot_sha, str) and re.fullmatch(r"[a-f0-9]{64}", snapshot_sha),
+                 "Invalid settled research snapshot fingerprint")
+        raw_snapshot = read(f"stage_artifacts/{snapshot_sha}.json", MAX_PACKAGE_BYTES)
+        _require(hashlib.sha256(raw_snapshot).hexdigest() == snapshot_sha, "Research snapshot fingerprint mismatch")
+        snapshot = _json(raw_snapshot, "research coverage snapshot")
+    _require(isinstance(snapshot, dict), "Invalid settled research snapshot")
+    findings = document
+    if isinstance(findings, dict):
+        findings = findings.get("findings", findings)
+    _require(isinstance(findings, dict) and isinstance(findings.get("candidate_bindings_and_decisions", []), list)
+             and isinstance(findings.get("page_status_sources", {}), dict)
+             and all(page in PAGE_CHECKS and isinstance(items, list) for page, items in findings.get("page_status_sources", {}).items()),
+             "Invalid research topic handoff")
+    return findings, snapshot
+
+
+def _assigned_primary_matches(assignment, findings, url, reads, settled_sources):
+    source_id = assignment.get("primary_source_id")
+    if not isinstance(source_id, str) or source_id not in settled_sources:
+        return False
+    records = findings.get("source_records", findings.get("sources", []))
+    if isinstance(records, dict):
+        records = [records[source_id]] if source_id in records else []
+    elif isinstance(records, list):
+        records = [r for r in records if isinstance(r, dict) and r.get("source_id", r.get("id")) == source_id]
+    else:
+        return False
+    records.append(assignment)
+    records.append(settled_sources[source_id])
+    # 原生操作回执保留 body_sha256，URL 保存在同一研究结算的 sources 表中。
+    if not all(isinstance(record, dict) for record in records):
+        return False
+    urls = [record["url"] for record in records if "url" in record]
+    hashes = [record[key] for record in records for key in ("content_sha256", "body_sha256") if key in record]
+    return bool(urls and hashes) and all(value == url for value in urls) and all(
+        isinstance(value, str) and value == hashes[0] for value in hashes) and (source_id, hashes[0]) in reads
+
+
 def _time(value):
     # 共享时间解析器会携带原始值；私有审计必须在本层统一脱敏。
     try:
@@ -97,6 +173,7 @@ def _validate_audit(directory):
     """只读检查；通过不等于证实事实或允许公开私有材料。"""
     root = Path(directory).resolve(strict=True)
     total = 0
+    package_limit = MAX_PACKAGE_BYTES
     read_cache = {}
 
     def read(relative, max_bytes=MAX_FILE_BYTES):
@@ -109,11 +186,11 @@ def _validate_audit(directory):
         _require(not path.is_symlink() and not path.parent.is_symlink(), "Audit files must not be symlinks")
         _require(path.is_file(), f"Missing audit file: {relative}")
         _require(path.stat().st_size <= max_bytes, "Audit file exceeds size limit")
-        remaining = min(max_bytes, MAX_PACKAGE_BYTES - total)
+        remaining = min(max_bytes, package_limit - total)
         with path.open("rb") as stream:
             data = stream.read(remaining + 1)
         total += len(data)
-        _require(len(data) <= max_bytes and total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
+        _require(len(data) <= max_bytes and total <= package_limit, "Audit package exceeds size limit")
         read_cache[relative] = data
         return data
 
@@ -281,7 +358,13 @@ def _validate_audit(directory):
     complete_contract = metadata["schema_version"] in {"1.3", "1.4"}
     for name, expected in metadata["inputs"]["prompt_hashes"].items():
         _require(hashlib.sha256(read(f"prompts/{name}")).hexdigest() == expected, "Prompt fingerprint mismatch")
-    new_prompt = community.PROMPT_MARKER.encode() in read("prompts/audit.md")
+    audit_prompt = read("prompts/audit.md")
+    whole_edition = b"Group-Delivery: complete_six_topics_v1" in audit_prompt.splitlines()
+    require_complete_first = whole_edition or metadata["date"] >= "2026-11-19"
+    if (whole_edition and layered_budget and page_scope is None
+            and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines()):
+        package_limit = WHOLE_EDITION_PACKAGE_BYTES
+    new_prompt = community.PROMPT_MARKER.encode() in audit_prompt
     _require(discovery_contract == new_prompt, "Coverage contract must match the original frozen audit prompt")
     history_bytes = read("history.json")
     _require(hashlib.sha256(history_bytes).hexdigest() == metadata["inputs"]["history_sha256"], "History fingerprint mismatch")
@@ -669,7 +752,8 @@ def _validate_audit(directory):
             else:
                 blockers.append("required_coverage_incomplete")
 
-    calls, retained_sources, retained_source_text = {}, {}, {}
+    calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, {}, {}, {}
+    resolved_topic_reads = set()
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
         calls[call["stage"]] = call
@@ -680,7 +764,7 @@ def _validate_audit(directory):
         resolution = call.get("coverage_resolution")
         if resolution is not None:
             _require(layered_budget and call["stage"] == "research" and call["status"] == "partial"
-                     and allow_partial and not coverage_gaps and not unchecked,
+                     and allow_partial and (require_complete_first or not coverage_gaps) and not unchecked,
                      "Coverage resolution requires a retained partial research stage and completed current checks")
             attempt = call["attempt_records"][-1]
             _require(attempt["result_sha256"] is not None, "Coverage resolution needs the original research result")
@@ -825,11 +909,18 @@ def _validate_audit(directory):
                      "Original research cannot finish before its retained no-dispatch observations")
             _require(all(community.executed_source_status(source) == "ok" and _time(source["retrieved_at"]) > research_finished for source in resolved),
                      "Coverage resolution needs successful evidence retrieved after the original result")
-            for name in prior_gaps:
-                _require(any(source["id"] in metadata["checks"][name]["source_ids"]
-                             and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"])) for source in resolved),
-                         "Coverage resolution must bind later evidence for every original gap")
-            warnings.append({"code": "research_coverage_resolved", "path": f"model_calls[{index}]"})
+            supported = {name for name in prior_gaps if any(
+                source["id"] in metadata["checks"][name]["source_ids"]
+                and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"]))
+                for source in resolved)}
+            repaired = set(prior_gaps) - set(coverage_gaps)
+            _require(repaired and repaired <= supported,
+                     "Coverage resolution must bind later evidence for every original gap marked complete")
+            resolved_topic_reads = {(name, source["id"]) for name in repaired for source in resolved
+                                    if source["id"] in metadata["checks"][name]["source_ids"]
+                                    and ((discovery_contract and name in community.CHECKS) or source_matches(name, source["url"]))}
+            code = "research_coverage_partially_resolved" if coverage_gaps else "research_coverage_resolved"
+            warnings.append({"code": code, "path": f"model_calls[{index}]"})
         if call["status"] == "ok":
             _require(not call["error"], "Successful model stage cannot contain an error")
         elif call["status"] == "partial":
@@ -842,13 +933,76 @@ def _validate_audit(directory):
     if set(calls) != {"research", "editor"}:
         blockers.append("model_stage_missing")
 
+    first_edition = previous_report is None and require_complete_first
+    if first_edition:
+        research = calls.get("research")
+        handoff, snapshot = _settled_research(research, read)
+        settled_checks, settled_discovery, bound = {}, {}, {}
+        if not prior_checks and not {"candidates", "checks", "sources"} <= snapshot.keys():
+            blockers.append("complete_edition_required")
+        if not prior_checks and "checks" in snapshot:
+            original_candidates = snapshot.get("candidates")
+            _require(isinstance(original_candidates, dict) and original_candidates.get("mode") == "live"
+                     and original_candidates.get("items") == candidates["items"], "Settled research candidates differ")
+            originals = snapshot.get("sources")
+            checks, discovery = snapshot["checks"], snapshot.get("discovery", {})
+            _require(isinstance(checks, dict) and isinstance(discovery, dict) and isinstance(originals, list)
+                     and all(isinstance(item, dict) for item in checks.values()), "Invalid settled topic evidence")
+            settled_checks = {key: dict(item) for key, item in checks.items()}
+            for item in settled_checks.values():
+                if "detail" in item:
+                    _require("reason" not in item, "Ambiguous original coverage explanation")
+                    item["reason"] = item.pop("detail")
+            validation = dict(metadata, checks=settled_checks, sources=originals)
+            _require(not discovery_contract or "discovery" in snapshot, "Settled discovery snapshot required")
+            if "discovery" in snapshot:
+                validation["discovery"] = discovery
+            validate("research-audit", validation)
+            _require(all(metadata["checks"][name]["status"] in {"failed", "not_checked"}
+                         for name, check in settled_checks.items() if check["status"] in {"failed", "not_checked"}),
+                     "Completing a settled coverage gap requires verified coverage resolution")
+            settled_discovery = discovery
+            for original in originals:
+                ref, fingerprint = original["id"], original["content_sha256"]
+                current = sources.get(ref)
+                _require(current and current["url"] == original["url"], "Settled source ID and URL must be preserved")
+                attempts = original.get("attempt_records")
+                if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
+                    raise BriefError("Settled source attempts must be preserved")
+                if attempts:
+                    _require(community.cancelled_suffix_preserves_response(current, original)
+                             and (len(current["attempt_records"]) > len(attempts) or current == original),
+                             "Changed retained sources require an executed retry")
+                _require(ref not in bound, "Duplicate settled source identity")
+                if fingerprint is None:
+                    if community.executed_source_status(original) != "ok":
+                        bound[ref] = original
+                    continue
+                if fingerprint == current["content_sha256"]:
+                    text = source_text[ref]
+                else:
+                    relative = f"evidence/{fingerprint}.txt"
+                    raw = read(relative, MAX_PACKAGE_BYTES)
+                    _require(hashlib.sha256(raw).hexdigest() == fingerprint, "Original source response fingerprint mismatch")
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise BriefError("Original source response must be UTF-8") from exc
+                if community.executed_source_status(original) == "ok":
+                    _require(bool(text.strip()), "Original successful source evidence is empty")
+                bound[ref] = retained_sources[ref] = original
+                retained_source_text[ref] = text
+            if discovery_contract:
+                community.validate_discovery(validation, bound, retained_source_text, candidates, history,
+                                             _require, _time, discovery_read, previous_metadata)
+
     validate_current_outputs(metadata, candidates, read, _require, _json)
     by_event = {}
     for candidate in candidates["items"]:
         key = candidate["event_key"]
         _require(key not in by_event, "Duplicate candidate event key")
         by_event[key] = candidate
-    decisions = {}
+    decisions, candidate_reads = {}, {}
     for decision in metadata["decisions"]:
         key = decision["event_key"]
         _require(key in by_event and key not in decisions, "Each decision must name one unique candidate")
@@ -860,13 +1014,14 @@ def _validate_audit(directory):
         versions.extend((retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
                         for s in linked if s["id"] in retained_sources)
         candidate_versions = [(retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
-                              for s in linked if s["id"] in retained_sources] if retained_sources else versions
+                              for s in linked if s["id"] in retained_sources] if prior_checks else versions
         matching = [(s, text) for s, text in candidate_versions if community.executed_source_status(s) == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
                     and _time(s["retrieved_at"]) == _time(candidate["retrieved_at"])]
         _require(bool(matching), "Candidate needs matching publication, retrieval and source evidence")
-        _require(any(candidate["evidence"] in text for _, text in matching), "Candidate evidence must occur in the retained source text")
+        candidate_reads[key] = {(s["id"], s["content_sha256"]) for s, text in matching if candidate["evidence"] in text}
+        _require(bool(candidate_reads[key]), "Candidate evidence must occur in the retained source text")
         if decision["disposition"] in {"duplicate", "update"}:
             _require(bool(decision["history_entry_ids"]), "Duplicate/update decisions require history entry references")
         if decision["disposition"] == "update":
@@ -922,6 +1077,31 @@ def _validate_audit(directory):
         _require(linked and all(community.executed_source_status(source) == "ok" for source in linked),
                  "Coverage status requires successful source evidence")
         status_entries[key] = entry
+    topic_reads, discovered_reads = {}, {}
+    if first_edition:
+        check_tables = ((metadata["checks"], sources), (prior_checks, retained_sources))
+        discovery_tables = ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources))
+        if not prior_checks:
+            check_tables = ((settled_checks, bound),)
+            discovery_tables = ((settled_discovery, bound),)
+        for page, checks in page_checks.items():
+            topic_reads[page] = {(ref, records[ref]["content_sha256"])
+                                for table, records in check_tables
+                                for check in checks for ref in table.get(check, {}).get("source_ids", ())
+                                if ref in records and community.executed_source_status(records[ref]) == "ok"
+                                and (not prior_checks or table is prior_checks or (check, ref) in resolved_topic_reads)
+                                and (check in community.CHECKS or source_matches(check, records[ref]["url"]))}
+        for discovery, records in discovery_tables:
+            for query in discovery.get("queries", []):
+                for result in query["results"]:
+                    if result["disposition"] in SELECTED:
+                        discovered_reads.setdefault((query["family"], result["event_key"]), set()).update(
+                            (ref, records[ref]["content_sha256"]) for ref in result["source_ids"]
+                            if ref in records and community.executed_source_status(records[ref]) == "ok"
+                            and (not prior_checks or discovery is prior_discovery or
+                                 ((query["family"], query["source_id"]) in resolved_topic_reads and query["attempt"] >
+                                  len(retained_sources.get(query["source_id"], {}).get("attempt_records", [])))))
+    supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]
     if draft_sha is None:
         blockers.append("draft_missing")
@@ -971,6 +1151,37 @@ def _validate_audit(directory):
             _require(isinstance(urls, list) and urls and all(isinstance(url, str) and url in permitted for url in urls)
                      and (key in status_entries or by_event[key]["source_url"] in urls),
                      "Draft sources differ from retained candidate evidence")
+            if first_edition:
+                page = entry.get("article_id")
+                if not isinstance(page, str) or page not in topic_reads:
+                    supported_entries = False
+                else:
+                    status = key in status_entries
+                    allowed = set(topic_reads[page])
+                    for check in page_checks[page]:
+                        allowed.update(discovered_reads.get((check, key), ()))
+                    if status:
+                        for item in handoff.get("page_status_sources", {}).get(page, []):
+                            if not isinstance(item, dict) or item.get("source_id") not in binding["source_ids"]:
+                                continue
+                            ref = item["source_id"]
+                            versions = [retained_sources]
+                            if any((check, ref) in resolved_topic_reads for check in page_checks[page]):
+                                versions.append(sources)
+                            for records in versions:
+                                version = records.get(ref)
+                                if (version and community.executed_source_status(version) == "ok"
+                                        and (version["url"], version["content_sha256"]) == (item.get("url"), item.get("content_sha256"))):
+                                    allowed.add((ref, version["content_sha256"]))
+                        supported_entries &= set(urls) <= {sources[ref]["url"] for ref, _ in allowed if ref in binding["source_ids"]}
+                    else:
+                        assignments = [item for item in handoff.get("candidate_bindings_and_decisions", [])
+                                       if isinstance(item, dict) and item.get("event_key") == key and item.get("article_id")]
+                        if assignments:
+                            supported_entries &= all(item["article_id"] == page and _assigned_primary_matches(
+                                item, handoff, by_event[key]["source_url"], candidate_reads[key], retained_sources) for item in assignments)
+                        else:
+                            supported_entries &= bool(candidate_reads[key] & allowed)
             if key in decisions and decisions[key]["disposition"] == "update":
                 _require(entry.get("update_of") in decisions[key]["history_entry_ids"], "Draft update must preserve its history relationship")
             else:
@@ -981,6 +1192,17 @@ def _validate_audit(directory):
         accounting["charged_seconds"] = accounting["successful_seconds"] + accounting["reserved_unknown_seconds"]
         if accounting["charged_seconds"] > limits["run_seconds"] + LAYERED_TIME_TOLERANCE:
             blockers.append("run_budget_exceeded")
+    if first_edition:
+        articles = draft.get("articles") if draft_sha is not None else None
+        report_fields = {"schema_version", "date", "revision", "title", "subtitle", "articles", "entries", "images", "poster"}
+        if (page_scope is not None or not isinstance(articles, list) or draft.get("schema_version") != "1.0"
+                or type(draft.get("revision")) is not int or draft["revision"] != 1 or set(draft) != report_fields
+                or not all(isinstance(a, dict) for a in articles)
+                or [a.get("id") for a in articles] != list(PAGE_CHECKS)
+                or not all(isinstance(entry.get("article_id"), str) and entry["article_id"] in PAGE_CHECKS for entry in draft["entries"])
+                or {entry["article_id"] for entry in draft["entries"]} != set(PAGE_CHECKS) or not supported_entries):
+            blockers.append("complete_edition_required")
+
     result = {"schema_version": metadata["schema_version"], "date": metadata["date"], "audit_valid": True,
             "readiness": "blocked" if blockers else ("partial" if coverage_gaps else ("ready" if selected_count else "zero_items")),
             "blockers": sorted(set(blockers)), "candidate_count": len(by_event), "selected_count": selected_count,

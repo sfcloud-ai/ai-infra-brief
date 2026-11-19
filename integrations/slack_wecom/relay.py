@@ -108,6 +108,12 @@ def load_config(root):
     return config
 
 
+def require_notice_ingress(config, *, scheduled=False):
+    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+    if day >= notice_format.COMPLETE_EDITION_FROM and not (scheduled or config.get("notice_connector")):
+        raise RelayError("notice_connector_or_scheduler_required", 500)
+
+
 def validate_notice_connector(profile):
     """固定一个用户授权的 App，同时保留原晨报发送者。"""
     keys = {"user_id", "app_id", "attribution_text", "report_base_url", "not_before"}
@@ -725,6 +731,23 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(value)))
         self.db.commit()
 
+    def delivery_started(self, request_id):
+        if not request_id:
+            return False
+        row = self.db.execute("SELECT status,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
+        if row and (row[0] in {"sending", "sent", "unknown"} or row[1] > 0):
+            return True
+        return any(self.db.execute("SELECT 1 FROM " + table +
+                                   " WHERE request_id=? AND status NOT IN ('pending','failed','not_attempted') LIMIT 1",
+                                   (request_id,)).fetchone() for table in ("parts", "image_parts"))
+
+    def started_notice_owner(self, day, day_key, edition_key):
+        owners = [self.get("started:" + day_key), self.get(day_key) or self.get(edition_key)]
+        for table in ("scheduled_notices", "scheduled_revision_notices"):
+            if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                owners.extend(row[0] for row in self.db.execute("SELECT request_id FROM " + table + " WHERE report_date=?", (day,)))
+        return next((owner for owner in owners if self.delivery_started(owner)), None)
+
     def status(self, request_id):
         row = self.db.execute("SELECT status,parts_total,parts_sent FROM requests WHERE id=?", (request_id,)).fetchone()
         if not row:
@@ -754,7 +777,7 @@ class Relay:
             if profile is not None and saved is None:
                 store.set("notice_connector_v1", expected)
 
-    def notice(self, message):
+    def notice(self, message, *, automatic=False):
         profile = self.config.get("notice_connector")
         if profile is None or message.get("user") != profile["user_id"]:
             return None
@@ -764,6 +787,16 @@ class Relay:
                 return candidate
             key = digest(message)
             if key not in self._notice_cache:
+                day = notice_url_day(candidate["url"], profile, allow_current=True)
+                try:
+                    notice_format.validate_first_notice({"report_date":day, "notice_key":candidate["url"], "text":candidate["text"]},
+                                                        profile["report_base_url"])
+                except notice_format.FirstNoticeIncomplete:
+                    scope = [self.config["team_id"], self.config["channel_id"]]
+                    day_key = "notice_day:" + digest([*scope, day])
+                    edition_key = "notice_edition:" + digest([*scope, candidate["url"]])
+                    if not self.store.started_notice_owner(day, day_key, edition_key):
+                        raise
                 # 读取失败在游标推进及投递写入之前向外传播。
                 manifest = self.notice_reader.read(candidate)
                 verified = _bind_notice_manifest(candidate, manifest, profile)
@@ -771,6 +804,12 @@ class Relay:
                     self._notice_cache.pop(next(iter(self._notice_cache)))
                 self._notice_cache[key] = verified
             return self._notice_cache[key]
+        except notice_format.FirstNoticeIncomplete as exc:
+            if automatic:
+                print(json.dumps({"event":"first_notice_requires_all_six_articles","report_date":day,
+                                  "message_ts":message.get("ts")}), flush=True)
+                return None
+            raise RelayError("first_notice_requires_all_six_articles", 409) from exc
         except RelayError:
             return None
 
@@ -793,7 +832,7 @@ class Relay:
     def is_brief(self, message):
         profile = self.config.get("notice_connector")
         if profile is not None and message.get("user") == profile["user_id"]:
-            return self.notice(message) is not None
+            return self.notice(message, automatic=True) is not None
         text = message_text(message)
         subtype = message.get("subtype")
         return (message.get("user") == self.config["sender_id"]
@@ -902,6 +941,17 @@ class Relay:
                 if row[0] != digest(intent):
                     raise RelayError("request_id_conflict", 409)
                 return self.store.status(request_id)
+            # 旧发送者提供自由文本，无法核对发布清单。新晨报统一经已验证的通知入口。
+            title = text.lstrip().split("\n", 1)[0]
+            if not edition and TITLE.search(title):
+                observed = float(timestamp) if timestamp else self.clock()
+                day = time.strftime("%Y-%m-%d", time.gmtime(observed + 8 * 3600))
+                stated = re.search(r"\b20\d{2}-\d{2}-\d{2}\b", title)
+                if max(day, stated.group() if stated else day) >= notice_format.COMPLETE_EDITION_FROM:
+                    if mode == "auto":
+                        print(json.dumps({"event":"verified_notice_required","message_ts":timestamp}), flush=True)
+                        return {"status":"rejected","error":"verified_notice_required"}
+                    raise RelayError("verified_notice_required", 409)
             edition_request = (self.store.get(day_key) if day_key else None) or (self.store.get(edition) if edition else None)
             if repeat and edition:
                 for table in ('scheduled_notices', 'scheduled_revision_notices'):
@@ -925,6 +975,20 @@ class Relay:
             if prior and not repeat:
                 status = "already_sent" if prior[0] in ("sent", "already_sent") else "source_already_attempted"
             if status == "sending":
+                started_owner = self.store.started_notice_owner(report_date, day_key, edition) if edition else None
+                if started_owner:
+                    # 更正通知可能接替日期所有者后发送失败，须保留此前已开始的投递。
+                    db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", ("started:" + day_key, started_owner))
+                if edition and not started_owner:
+                    try:
+                        notice_format.validate_first_notice({"report_date":report_date,"notice_key":notice_key,"text":text},
+                                                            self.config["notice_connector"]["report_base_url"])
+                    except notice_format.FirstNoticeIncomplete as exc:
+                        if mode == "auto":
+                            print(json.dumps({"event":"first_notice_requires_all_six_articles","report_date":report_date,
+                                              "message_ts":timestamp}), flush=True)
+                            return {"status":"rejected","error":"first_notice_requires_all_six_articles"}
+                        raise RelayError("first_notice_requires_all_six_articles", 409) from exc
                 verified_images, preflight_error = self.prepare_notice_images(image_plans)
                 if preflight_error:
                     status = "failed"
@@ -1174,6 +1238,7 @@ def main():
         connection.close()
         return
     config = load_config(args.root)
+    require_notice_ingress(config)
     with exclusive(args.root):
         secrets = load_secrets(args.root)
         slack = Slack(secrets["slack_user_token"], config)

@@ -1,5 +1,7 @@
 """固定本机调度客户端，不读取凭据，不接受任意网址或 shell。"""
 import argparse
+import base64
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -28,6 +30,12 @@ def read_result(data, request):
     result = json.loads(data.decode("utf-8"), object_pairs_hook=unique)
     sent = json.loads(request.decode("utf-8"), object_pairs_hook=unique)
     require(isinstance(result, dict) and isinstance(sent, dict))
+    if result.get("error") == "first_notice_requires_all_six_articles":
+        require(sent.get("action") == "admit" and result == {
+            "status":"not_verified", "error":"first_notice_requires_all_six_articles",
+            "request_id":sent["request_id"], "report_commit":sent["report_commit"],
+            "bundle_sha256":hashlib.sha256(base64.b64decode(sent["bundle_base64"], validate=True)).hexdigest()})
+        return result
     if sent.get("action") != "inspect":
         require(result.get("status") in {"not_found", "not_verified", "queued", "sending", "sent", "failed", "unknown", "partial", "skipped"})
         return result

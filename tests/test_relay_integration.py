@@ -27,6 +27,7 @@ sys.path.insert(0, str(RELAY_ROOT))
 import relay
 import test_images as image_fixtures
 import test_relay as relay_fixtures
+from test_notice_connector import NOTICE_CONFIG
 sys.path.pop(0)
 
 
@@ -86,7 +87,7 @@ class RelayIntegrationTests(unittest.TestCase):
 
     def test_original_and_connector_tests_run_with_outbound_guard(self):
         result = self.checked_runner()
-        self.assertEqual(result["tests_run"], 239)  # 原有 212 项，加页级补发与纠错接续 27 项。
+        self.assertEqual(result["tests_run"], 242)  # 包括定时和连接器入口的整期首发。
         self.assertEqual(result["outbound_attempts"], 0)
         if result["skipped"]:
             self.assertEqual(result["skipped"], 3)

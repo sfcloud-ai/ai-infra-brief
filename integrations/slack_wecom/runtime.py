@@ -341,6 +341,8 @@ def serve(module, root, release, activation_file=None, scheduler_config=None):
         else:
             from scheduled_runtime import ScheduledRuntime, load_config as load_scheduled_config
         scheduled_options = load_scheduled_config(scheduler_config)
+    if hasattr(module, "require_notice_ingress"):
+        module.require_notice_ingress(config, scheduled=scheduled_options is not None)
     with module.exclusive(root):
         credentials = module.load_secrets(root)
         slack = module.Slack(credentials["slack_user_token"], config)
@@ -429,6 +431,14 @@ def main():
     args = parser.parse_args()
     module = load_module(args.code)
     if args.command == "capabilities":
+        if args.root is not None and hasattr(module, "require_notice_ingress"):
+            try:
+                module.require_notice_ingress(module.load_config(args.root))
+            except module.RelayError as error:
+                if error.code != "notice_connector_or_scheduler_required":
+                    raise
+                print(json.dumps({"error": error.code, "messages_sent": 0}))
+                return
         print('{"relay":true,"resume":true,"pause_activate":true,"messages_sent":0}')
         return
     if args.root is None or not args.root.is_absolute():

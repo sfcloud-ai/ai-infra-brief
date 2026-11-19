@@ -9,7 +9,7 @@ from tests import test_page_successor as successor_tests
 from tests.test_resolved_coverage import ResolvedCoverageTests
 from tests.test_research_audit import encoded
 from ai_brief.research_audit import _json, _require
-from ai_brief.research_continuation import validate_continuation, validate_current_outputs
+from ai_brief.research_continuation import referenced_editor_input, validate_continuation, validate_current_outputs
 from ai_brief.storage import BriefError
 from ai_brief.source_identity import source_identity
 from copy import deepcopy
@@ -17,6 +17,30 @@ from copy import deepcopy
 
 class ModelContinuationAuditTests(LayeredBudgetTests):
     notice = successor_tests.PageSuccessorTests.notice
+    def test_original_editor_findings_are_bound_and_not_modified(self):
+        request = "morning-20261101-r1"
+        editor_id, research_id, source_id = map(str, (uuid4(),uuid4(),uuid4()))
+        common = dict(request_id=request, operation_id=research_id, input_sha256="a"*64, stage="research")
+        row = dict(operation_id=source_id,input_sha256="b"*64,result_sha256="c"*64,body_sha256="d"*64)
+        findings = self.js(dict(**common,source_records={"prior":row}))
+        outputs = [dict(name="findings.json", sha256=findings)]
+        research = dict(operation_id=research_id,input_sha256="a"*64,status="partial",elapsed_seconds=1,outputs=outputs)
+        result = self.js(dict(**common,status="partial",elapsed_seconds=1,outputs=outputs))
+        original = dict(request_id=request,operation_id=editor_id,stage="editor",source_attempt_count=1,
+                        source_records_location="findings.json#/source_records",
+                        research=dict(**research,result_sha256=result,started_at="original"))
+        raw = encoded(original)
+        def obj(key):
+            data=(self.root/"stage_artifacts"/(key+".json")).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(),key)
+            return json.loads(data)
+        view = referenced_editor_input(original,request,editor_id,obj,_require)
+        self.assertEqual(view["sources"],[row])
+        self.assertEqual(encoded(original),raw)
+        self.assertNotIn("started_at",view["research"])
+        original["research"]["outputs"]=[dict(name="findings.json",sha256="e"*64)]
+        with self.assertRaisesRegex(BriefError,"digest differs"):
+            referenced_editor_input(original,request,editor_id,obj,_require)
     def js(self, value):
         return self.artifact(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
 

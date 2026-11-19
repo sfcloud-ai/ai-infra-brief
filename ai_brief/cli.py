@@ -7,6 +7,7 @@ from .contracts import RESOURCE_ROOT
 from .pipeline import TZ, run, simulate_delivery
 from .storage import BriefError, json_text
 from .research_audit import validate_audit
+from .source_followup import PreflightError, source_followup
 
 
 def main(argv=None):
@@ -25,6 +26,10 @@ def main(argv=None):
     deliver.add_argument("--adapter", default="mock")
     audit = commands.add_parser("audit-research", help="Validate a PRIVATE live research package; never publish or send")
     audit.add_argument("directory", type=Path)
+    sources = commands.add_parser("source-followup", help="Plan the next source batch from retained native receipts")
+    sources.add_argument("ledger", type=Path)
+    sources.add_argument("operations", type=Path)
+    sources.add_argument("--since", required=True, help="Frozen source window lower bound, including timezone")
     args = parser.parse_args(argv)
     try:
         if args.command == "run":
@@ -32,11 +37,13 @@ def main(argv=None):
                          allow_backfill=args.allow_backfill, adapter=args.adapter, history_dir=args.history_dir)
         elif args.command == "audit-research":
             result = validate_audit(args.directory)
+        elif args.command == "source-followup":
+            result = source_followup(args.ledger, args.operations, args.since)
         else:
             result = simulate_delivery(args.state_dir, args.date, adapter=args.adapter)
         print(json_text(result), end="")
         return 3 if args.command == "audit-research" and result["readiness"] == "blocked" else 0
-    except (BriefError, OSError) as exc:
+    except (BriefError, PreflightError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

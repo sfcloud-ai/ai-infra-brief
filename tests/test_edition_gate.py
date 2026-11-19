@@ -1,0 +1,379 @@
+"""冻结提示词决定整期六专题交付门槛；样本不代表实际成稿。"""
+import hashlib
+import json
+import unittest
+from copy import deepcopy
+
+from ai_brief.contracts import RESOURCE_ROOT
+from ai_brief.research_audit import PAGE_CHECKS, _settled_research
+from ai_brief.storage import BriefError
+from tests import test_community_discovery as community
+from tests import test_layered_budget as layered
+from tests import test_page_scope as scoped
+from tests import test_research_audit as original_audit
+
+
+class CompleteEditionTests(unittest.TestCase):
+    save = layered.LayeredBudgetTests.save
+    check = layered.LayeredBudgetTests.check
+    artifact = layered.LayeredBudgetTests.artifact
+    notice = scoped.PageScopeTests.notice
+
+    def marker(self):
+        data = b"Group-Delivery: complete_six_topics_v1"
+        (self.root / "prompts" / "audit.md").write_bytes(data)
+        self.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(data).hexdigest()
+
+    def serving_source(self, case):
+        uri = "https://github.com/vllm-project/vllm/pull/123"
+        source = next(s for s in case.audit["sources"] if s["id"] == "source")
+        source["url"] = case.candidates["items"][0]["source_url"] = uri
+        case.draft["entries"][0]["source_urls"] = [uri]
+
+    def settle_checks(self, case):
+        attempt = case.audit["model_calls"][0]["attempt_records"][-1]
+        snapshot = {key: case.audit[key] for key in ("checks", "sources", "discovery") if key in case.audit}
+        snapshot["candidates"] = case.candidates
+        result = dict(stage="research", stage_status=attempt["status"], input_sha256=attempt["input_sha256"],
+                      elapsed_seconds=attempt["elapsed_seconds"], output_sha256=case.artifact(original_audit.encoded(snapshot)))
+        attempt["result_sha256"] = case.artifact(original_audit.encoded(result))
+
+    def discovery_edition(self):
+        case = community.CommunityDiscoveryTests("runTest")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        prompt = (RESOURCE_ROOT / "prompts/audit.md").read_bytes()
+        (case.root / "prompts/audit.md").write_bytes(prompt)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(prompt).hexdigest()
+        case.draft.update(schema_version="1.0", title="合成晨报", subtitle="合成副标题", images=[], poster="assets/overview.png")
+        case.draft["articles"] = [dict(id=page, title=page) for page in PAGE_CHECKS]
+        case.draft["entries"][0]["article_id"] = "model-serving-gpu"
+        self.serving_source(case)
+        for page in list(PAGE_CHECKS)[1:]:
+            ref = "coverage-" + PAGE_CHECKS[page][0]
+            uri = next(src["url"] for src in case.audit["sources"] if src["id"] == ref)
+            key = "status-" + page
+            case.audit["status_entries"].append(dict(event_key=key, source_ids=[ref], reason="已核对合成来源"))
+            case.draft["entries"].append(dict(event_key=key, article_id=page, source_urls=[uri]))
+        return case
+
+    def test_recovered_check_can_coexist_with_another_disclosed_gap(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        failed = layered.LayeredBudgetTests.failed(case, kind="transport")
+        failed["attempt_records"][0].update(status="failed", error=failed["error"])
+        output, original, call = case.retained_detail_resolution()
+        status = next(r for r in case.audit["status_entries"] if r["event_key"] == "status-small-model-status")
+        entry = next(r for r in case.draft["entries"] if r["event_key"] == status["event_key"])
+        source = next(s for s in case.audit["sources"] if s["id"] == "coverage-glm_blog")
+        status["source_ids"], entry["source_urls"] = [source["id"]], [source["url"]]
+        output["findings"] = {"page_status_sources": {"small-model-status": [
+            dict(source_id=source["id"], url=source["url"], content_sha256=source["content_sha256"])]}}
+        body = case.root / "evidence" / (source["id"] + ".txt")
+        archived = body.with_name(source["content_sha256"] + ".txt")
+        archived.write_bytes(body.read_bytes())
+        body.write_bytes(b"Updated official response")
+        source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"]*2,
+                      content_sha256=hashlib.sha256(body.read_bytes()).hexdigest(), retrieved_at="2026-11-06T07:24:00+08:00")
+        case.bind_retained_output(output, original, call)
+        result = case.check()
+        self.assertEqual(result["readiness"], "partial")
+        self.assertEqual(result["coverage_incomplete"], ["qwen_blog"])
+        self.assertIn("research_coverage_partially_resolved", {w["code"] for w in result["warnings"]})
+        self.assertEqual(output["checks"]["qwen_blog"]["status"], "failed")
+
+    def test_other_topics_evidence_cannot_supply_the_only_entry_for_a_page(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        failed = layered.LayeredBudgetTests.failed(case, name="embodied_training", kind="transport")
+        failed["attempt_records"][0].update(status="failed", error=failed["error"])
+        entry = next(e for e in case.draft["entries"] if e["article_id"] == "embodied-training")
+        status = next(s for s in case.audit["status_entries"] if s["event_key"] == entry["event_key"])
+        hardware = next(s for s in case.audit["sources"] if s["id"] == "coverage-hardware")
+        status["source_ids"], entry["source_urls"] = [hardware["id"]], [hardware["url"]]
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+        case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+
+    def test_resumed_topic_uses_the_original_check_or_its_recorded_recovery(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        failed = layered.LayeredBudgetTests.failed(case, name="embodied_training", kind="transport")
+        failed["attempt_records"][0].update(status="failed", error=failed["error"])
+        hardware = next(s for s in case.audit["sources"] if s["id"] == "coverage-hardware")
+        hardware["url"] = "https://arxiv.org/abs/2611.10000"
+        pages = {entry["article_id"]: entry for entry in case.draft["entries"]}
+        pages["hardware-status"]["source_urls"] = [hardware["url"]]
+        output, result, call = case.retained_detail_resolution()
+        pages["embodied-training"]["source_urls"] = [hardware["url"]]
+        status = next(s for s in case.audit["status_entries"] if s["event_key"] == pages["embodied-training"]["event_key"])
+        status["source_ids"] = [hardware["id"]]
+        case.bind_retained_output(output, result, call)
+        case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+        del call["coverage_resolution"]
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
+        findings = {"page_status_sources": {}}
+        result["outputs"] = [{"name": "findings.json", "sha256": case.artifact(original_audit.encoded(findings))}]
+        case.bind_retained_output(output, result, call)
+        read = lambda name, limit: (case.root / name).read_bytes()
+        self.assertEqual(_settled_research(call, read), (findings, output))
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
+        del result["outputs"]
+        output["findings"] = findings
+        case.bind_retained_output(output, result, call)
+        self.assertEqual(_settled_research(call, read), (findings, output))
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
+
+    def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        ids = ("source", "coverage-model_serving")
+        evidence = case.root / "evidence"
+        original = {key: (evidence / (key + ".txt")).read_bytes() for key in ids}
+
+        def pad(key, length):
+            data = original[key].ljust(length, b" ")
+            (evidence / (key + ".txt")).write_bytes(data)
+            next(s for s in case.audit["sources"] if s["id"] == key)["content_sha256"] = hashlib.sha256(data).hexdigest()
+
+        for key in ids:
+            pad(key, 11_000_000)
+        self.settle_checks(case)
+        self.assertEqual(case.check()["readiness"], "ready")
+        prompt = case.root / "prompts" / "audit.md"
+        current = prompt.read_bytes()
+        marker = b"Evidence-Package: whole_edition_32mb_v1"
+        historical = current.replace(marker, b"")
+        self.assertNotEqual(current, historical)
+        prompt.write_bytes(historical)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(historical).hexdigest()
+        case.reject("Audit package exceeds size limit")
+        prompt.write_bytes(current)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(current).hexdigest()
+        for key in ids:
+            pad(key, 16_000_000)
+        case.reject("Audit package exceeds size limit")
+        pad(ids[1], len(original[ids[1]]))
+        pad(ids[0], 20_000_001)
+        case.reject("Audit file exceeds size limit")
+
+    def test_topic_uses_archived_original_after_a_successful_reread(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        self.settle_checks(case)
+        source = next(s for s in case.audit["sources"] if s["id"] == "source")
+        body = case.root / "evidence/source.txt"
+        archived = body.with_name(source["content_sha256"] + ".txt")
+        original = body.read_bytes()
+        body.write_bytes(b"Updated official response")
+        source["content_sha256"] = hashlib.sha256(body.read_bytes()).hexdigest()
+        case.reject("Changed retained sources require an executed retry")
+        source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"] * 2)
+        with self.assertRaises(BriefError):
+            case.check()
+        archived.write_bytes(original)
+        self.assertEqual(case.check()["readiness"], "ready")
+        archived.write_bytes(b"wrong original")
+        case.reject("Original source response fingerprint mismatch")
+
+    def test_invalid_nested_settled_check_gives_an_audit_error(self):
+        case = self.discovery_edition()
+        hardware = case.audit["checks"]["hardware"]
+        case.audit["checks"]["hardware"] = None
+        self.settle_checks(case)
+        case.audit["checks"]["hardware"] = hardware
+        case.reject("Invalid settled topic evidence")
+
+    def test_unused_settled_source_cannot_disappear_from_final_inventory(self):
+        case = self.discovery_edition()
+        unused = dict(deepcopy(case.audit["sources"][0]), id="unused-source", url="https://example.org/unused")
+        case.audit["sources"].append(unused)
+        self.settle_checks(case)
+        case.audit["sources"].pop()
+        case.reject("Settled source ID and URL must be preserved")
+
+    def test_settled_discovery_cannot_credit_an_unrelated_source(self):
+        case = self.discovery_edition()
+        check = case.audit["checks"]["discovery_data_path"]
+        original = check["source_ids"]
+        check["source_ids"] = ["coverage-small_models"]
+        self.settle_checks(case)
+        check["source_ids"] = original
+        case.reject("Discovery check must bind its current-window queries")
+
+    def test_former_single_page_is_blocked_under_current_contract(self):
+        scoped.PageScopeTests.setUp(self)
+        self.marker()
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+
+    def test_old_prompt_cannot_publish_a_partial_first_edition_on_cutover_day(self):
+        case = original_audit.ResearchAuditTests("runTest")
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        self.assertEqual(case.check()["readiness"], "ready")
+        for name in ("audit", "candidates", "draft"):
+            data = json.dumps(getattr(case, name)).replace("2026-11-06", "2026-11-19")
+            setattr(case, name, json.loads(data))
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+
+    def test_current_full_prompt_blocks_incomplete_discovery_edition(self):
+        original = community.CommunityDiscoveryTests("runTest")
+        original.setUp()
+        self.addCleanup(original.doCleanups)
+        raw = (RESOURCE_ROOT / "prompts/audit.md").read_bytes()
+        (original.root / "prompts/audit.md").write_bytes(raw)
+        original.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(raw).hexdigest()
+        self.assertIn("complete_edition_required", original.check()["blockers"])
+
+    def test_missing_draft_with_all_checks_complete_is_blocked(self):
+        layered.LayeredBudgetTests.setUp(self)
+        self.marker()
+        self.draft = None
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+
+    def test_six_pages_with_bound_content_remain_ready(self):
+        layered.LayeredBudgetTests.setUp(self)
+        self.marker()
+        pages = list(PAGE_CHECKS)
+        delivery = dict(previous=None, added=pages, pending=[])
+        self.audit["page_scope"] = dict(contract="verified_pages_v1", page_delivery=delivery,
+                                        checked_pages=pages, previous_evidence=None)
+        self.draft.update(schema_version="1.2", articles=[dict(id=page, title=page) for page in pages],
+                          page_delivery=delivery)
+        self.draft["entries"][0]["article_id"] = pages[0]
+        self.serving_source(self)
+        refs = self.audit["checks"]["model_serving"]["source_ids"]
+        if "source" not in refs:
+            refs.append("source")
+        for page in pages[1:]:
+            source_id = "coverage-" + PAGE_CHECKS[page][0]
+            source = next(src for src in self.audit["sources"] if src["id"] == source_id)
+            key = "event-" + page
+            self.audit["status_entries"].append(dict(event_key=key, source_ids=[source_id],
+                                                     reason="已核对该主题来源，合成状态记录"))
+            self.draft["entries"].append(dict(event_key=key, article_id=page, source_urls=[source["url"]]))
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        self.audit.pop("page_scope")
+        self.audit["coverage_policy"] = "strict"
+        self.draft.pop("page_delivery")
+        self.draft.update(title="合成晨报", subtitle="合成副标题", images=[], poster="assets/overview.png")
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        self.draft["schema_version"] = "1.0"
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        self.settle_checks(self)
+        self.assertEqual(self.check()["readiness"], "ready")
+        alternate = deepcopy(next(s for s in self.audit["sources"] if s["id"] == "source"))
+        alternate.update(id="other-read", content_sha256=hashlib.sha256(b"Other response").hexdigest())
+        (self.root / "evidence/other-read.txt").write_bytes(b"Other response")
+        self.audit["sources"].append(alternate)
+        refs[refs.index("source")] = "other-read"
+        self.settle_checks(self)
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        refs[refs.index("other-read")] = "source"
+        self.audit["sources"].remove(alternate)
+        self.settle_checks(self)
+        self.draft["revision_notice"] = {}
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        self.draft.pop("revision_notice")
+        small_entry = next(item for item in self.draft["entries"] if item["article_id"] == "small-model-status")
+        check = self.audit["checks"]["small_models"]
+        ref = "coverage-qwen_blog"
+        official = next(src for src in self.audit["sources"] if src["id"] == ref)
+        status = next(item for item in self.audit["status_entries"] if item["event_key"] == small_entry["event_key"])
+        check["source_ids"].append(ref)
+        status["source_ids"], small_entry["source_urls"] = [ref], [official["url"]]
+        call = self.audit["model_calls"][0]
+        attempt = call["attempt_records"][-1]
+        findings = {"page_status_sources": {"small-model-status": [
+            dict(source_id=ref, url=official["url"], content_sha256=official["content_sha256"])]}}
+        output = self.artifact(original_audit.encoded(findings))
+        result = dict(stage="research", status="success", stage_status="ok", input_sha256=attempt["input_sha256"],
+                      elapsed_seconds=attempt["elapsed_seconds"], outputs=[dict(name="findings.json", sha256=output)])
+        def bind_snapshot():
+            result["output_sha256"] = self.artifact(original_audit.encoded({
+                "sources": self.audit["sources"], "checks": self.audit["checks"], "candidates": self.candidates}))
+        bind_snapshot()
+        attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
+        self.assertEqual(self.check()["readiness"], "ready")
+        snapshot_digest = result.pop("output_sha256")
+        attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        result["output_sha256"] = snapshot_digest
+        entry = self.draft["entries"][0]
+        primary = next(src for src in self.audit["sources"] if src["id"] == "source")
+        assignment = dict(article_id="inference-engines", event_key=entry["event_key"], primary_source_id="source",
+                          url=primary["url"], content_sha256=primary["content_sha256"])
+        findings["candidate_bindings_and_decisions"] = [assignment]
+        def bind_findings():
+            result["outputs"][0]["sha256"] = self.artifact(original_audit.encoded(findings))
+            attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
+        bind_findings()
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        assignment["article_id"] = entry["article_id"]
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        assignment.pop("url")
+        assignment["body_sha256"] = assignment.pop("content_sha256")
+        findings["source_records"] = {"source": {"body_sha256": primary["content_sha256"]}}
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        findings["source_records"]["source"]["body_sha256"] = "f" * 64
+        bind_findings()
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        del findings["source_records"]
+        assignment["content_sha256"] = assignment.pop("body_sha256")
+        assignment["url"] = primary["url"]
+        descriptor = result["outputs"][0]
+        descriptor["path"] = "research/outputs/" + descriptor.pop("name")
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        descriptor["name"] = "candidates.json"
+        bind_findings()
+        with self.assertRaisesRegex(BriefError, "Conflicting research findings descriptor"):
+            self.check()
+        del descriptor["name"]
+        for field, other in (("url", official["url"]), ("content_sha256", "a" * 64)):
+            assignment[field] = other
+            bind_findings()
+            self.assertIn("complete_edition_required", self.check()["blockers"])
+            assignment[field] = primary[field]
+        result["stage_status"] = attempt["status"] = call["status"] = "partial"
+        bind_findings()
+        self.assertEqual(_settled_research(call, lambda name, limit: (self.root / name).read_bytes())[0], findings)
+        attempt["status"] = call["status"] = "ok"
+        result["stage_status"] = "failed"
+        bind_findings()
+        with self.assertRaisesRegex(BriefError, "match the settled research attempt"):
+            self.check()
+        result["stage_status"] = "ok"
+        bind_findings()
+        check["source_ids"].remove(ref)
+        base_ref = "coverage-small_models"
+        status["source_ids"] = [base_ref]
+        small_entry["source_urls"] = [next(src["url"] for src in self.audit["sources"] if src["id"] == base_ref)]
+        previous_items, previous_decisions = self.candidates["items"], self.audit["decisions"]
+        self.candidates["items"], self.audit["decisions"] = [], []
+        entry = self.draft["entries"][0]
+        original_urls = entry["source_urls"]
+        status_source = next(item for item in self.audit["sources"] if item["id"] == "coverage-model_serving")
+        entry["source_urls"] = [status_source["url"]]
+        self.audit["status_entries"].append(dict(event_key=entry["event_key"], source_ids=[status_source["id"]],
+                                                 reason="已核对当期状态"))
+        bind_snapshot()
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "zero_items")
+        self.audit["status_entries"].pop()
+        entry["source_urls"] = original_urls
+        self.candidates["items"], self.audit["decisions"] = previous_items, previous_decisions
+        self.audit["coverage_policy"] = "publish_verified_with_gaps"
+        source = layered.LayeredBudgetTests.failed(self, kind="transport")
+        source["attempt_records"][0].update(status="failed", error=source["error"])
+        bind_snapshot()
+        bind_findings()
+        partial = self.check()
+        self.assertEqual(partial["readiness"], "partial")
+        self.assertEqual(partial["blockers"], [])
+        self.assertFalse(partial["delivery_allowed"])

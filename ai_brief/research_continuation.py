@@ -13,6 +13,47 @@ SHA = re.compile(r"[a-f0-9]{64}")
 UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}")
 
 
+def referenced_editor_input(document, request, previous_id, obj, need):
+    """从首稿实际消费的研究产物解析来源。只按摘要取回原件。"""
+    need(document.get("stage") == "editor" and document.get("request_id") == request
+         and document.get("operation_id") == previous_id
+         and document.get("source_records_location") == "findings.json#/source_records",
+         "original editor source reference differs")
+    research = document.get("research")
+    need(isinstance(research, dict), "original research descriptor is required")
+    result = obj(research.get("result_sha256"))
+    outputs = research.get("outputs")
+    need(result.get("stage") == "research" and result.get("request_id") == request
+         and isinstance(research.get("operation_id"), str) and UUID.fullmatch(research["operation_id"])
+         and isinstance(research.get("input_sha256"), str) and SHA.fullmatch(research["input_sha256"])
+         and result.get("operation_id") == research.get("operation_id")
+         and result.get("input_sha256") == research.get("input_sha256")
+         and research.get("status") == result.get("stage_status", result.get("status"))
+         and type(research.get("elapsed_seconds")) in (int, float) and research["elapsed_seconds"] == result.get("elapsed_seconds")
+         and isinstance(outputs, list) and isinstance(result.get("outputs"), list),
+         "original research result differs")
+    def findings_hash(items):
+        matches = [item.get("sha256") for item in items if isinstance(item, dict) and item.get("name") == "findings.json"]
+        need(len(matches) == 1 and isinstance(matches[0], str) and SHA.fullmatch(matches[0]), "original findings descriptor differs")
+        return matches[0]
+    digest = findings_hash(outputs)
+    need(digest == findings_hash(result["outputs"]), "original findings digest differs")
+    findings = obj(digest)
+    records = findings.get("source_records")
+    need(all(result.get(k) == findings.get(k) for k in ("request_id", "operation_id", "input_sha256", "stage"))
+         and isinstance(records, dict) and records and type(document.get("source_attempt_count")) is int
+         and len(records) == document["source_attempt_count"], "original findings source inventory differs")
+    sources = []
+    for record in records.values():
+        need(isinstance(record, dict) and isinstance(record.get("operation_id"), str) and UUID.fullmatch(record["operation_id"])
+             and all(isinstance(record.get(k), str) and SHA.fullmatch(record[k])
+                     for k in ("input_sha256", "result_sha256", "body_sha256")), "original findings source binding differs")
+        sources.append({k: record[k] for k in ("operation_id", "input_sha256", "result_sha256", "body_sha256")})
+    need(len({item["operation_id"] for item in sources}) == len(sources), "original findings repeat a source operation")
+    telemetry = {"started_at", "finished_at", "stage_start", "input_read_ledger"}
+    return {**document, "sources": sources, "research": {k: v for k, v in research.items() if k not in telemetry}}
+
+
 def validate_continuation(metadata, record, attempt, previous, read, require, parse, source_bindings=None):
     """只为有完整原始命令链、检查点和新增内容的同阶段续接放行。"""
     request = "morning-" + metadata["date"].replace("-", "") + "-r1"
@@ -192,7 +233,12 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
     need(previous["status"] in {"ok", "partial"} and previous["elapsed_seconds"] is not None
          and manifest["checkpoint_file_sha256"] == previous["result_sha256"] == attempt["checkpoint_sha256"]
          and sha(manifest["checkpoint_archive_sha256"]), "preceding successful checkpoint must be retained")
-    payload, prior_input = obj(manifest["payload_sha256"]), obj(previous["input_sha256"])
+    payload, original = obj(manifest["payload_sha256"]), obj(previous["input_sha256"])
+    prior_input = original
+    if "sources" not in original and stage == "editor" and original.get("source_records_location") == "findings.json#/source_records":
+        prior_input = referenced_editor_input(original, request, previous_id, obj, need)
+        if payload.get("research") == original["research"]:
+            payload = {**payload, "research": prior_input["research"]}
     source_fields = set("batch operation_id input_sha256 url status elapsed_seconds result_file result_sha256 body_file body_sha256 source_label".split())
     research_fields = set("operation_id input_file input_sha256 result_file result_sha256 status elapsed_seconds outputs".split())
     output_fields = {"name", "path", "sha256", "bytes"}
@@ -215,7 +261,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
     need(exact(binding, "previous_operation_id checkpoint_archive_sha256 checkpoint_file_sha256 added_evidence")
          and all(binding[k] == manifest[k] for k in binding)
          and manifest["payload_sha256"] != previous["input_sha256"], "payload checkpoint and evidence binding mismatch")
-    prior_hashes, pending = set(), [prior_input]
+    prior_hashes, pending = set(), [original, prior_input] if prior_input is not original else [original]
     while pending:
         value = pending.pop()
         if isinstance(value, dict):

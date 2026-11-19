@@ -2,13 +2,16 @@
 
 原只读校验套接字保持不变；导入模块不会创建监听器或启动服务。"""
 import base64
+import hashlib
 import json
 
 if __package__:
     from .notice_socket import peer_uid, bounded_read
+    from .notice_format import FirstNoticeIncomplete
     from .scheduled_delivery import inspection_identity
 else:
     from notice_socket import peer_uid, bounded_read
+    from notice_format import FirstNoticeIncomplete
     from scheduled_delivery import inspection_identity
 
 MAX_REQUEST = 12*1024*1024
@@ -40,7 +43,12 @@ def dispatch(data, queue, can_admit=lambda: True):
     if not isinstance(encoded,str):raise ValueError("Bundle encoding required")
     bundle=base64.b64decode(encoded,validate=True)
     if base64.b64encode(bundle).decode("ascii")!=encoded:raise ValueError("Canonical base64 required")
-    return queue.admit(request["request_id"],bundle,request["report_commit"])
+    try:
+        return queue.admit(request["request_id"],bundle,request["report_commit"])
+    except FirstNoticeIncomplete:
+        return {"status":"not_verified","error":"first_notice_requires_all_six_articles",
+                "request_id":request["request_id"],"report_commit":request["report_commit"],
+                "bundle_sha256":hashlib.sha256(bundle).hexdigest()}
 
 
 def handle(connection, allowed_uid, queue, can_admit=lambda: True):

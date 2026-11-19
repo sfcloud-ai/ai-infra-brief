@@ -132,6 +132,10 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(self.q.revisions.parts(self.plan["report_request_id"]), before)
         self.assertEqual(self.q.status(rid)["delivery_kind"], "initial")
         self.assertEqual([c[0] for c in self.calls], ["text", "image"])
+        scope = [self.q.config["team_id"], self.q.config["channel_id"]]
+        day_key = "notice_day:" + relay.digest([*scope, "2026-11-01"])
+        edition_key = "notice_edition:" + relay.digest([*scope, self.plan["notice_key"]])
+        self.assertEqual(self.store.started_notice_owner("2026-11-01", day_key, edition_key), rid)
         self.assertEqual(self.q.inspect(self.plan["report_request_id"], "2026-11-01")["scheduler"]["phase"], "superseded")
         assert_reconciled(self.store)
         with self.store.db:
@@ -170,6 +174,32 @@ class RevisionTests(unittest.TestCase):
         self.advance(); self.advance(); self.assertEqual([c[0] for c in self.calls], ["text", "image"])
         self.assertEqual(self.q.status(third)["parts_sent"], 2)
         assert_reconciled(self.store)
+
+    def test_effective_first_notification_checks_all_links_before_claiming_the_day(self):
+        from notice_format import validate_first_notice
+        from page_delivery import TOPICS
+        day = "2026-11-19"
+        root = self.q.config["notice_connector"]["report_base_url"] + day + "/"
+        _, revised_bundle = self.revise(admit=False)
+        for revision, bundle in ((1, self.bundle), (2, revised_bundle)):
+            self.live = hashlib.sha256(bundle).hexdigest()
+            rid = "morning-20261119-r" + str(revision)
+            plan = self.plans[self.live]
+            plan.update(report_request_id=rid, report_date=day, notice_key=root)
+            sections = ["AI Infra 晨报 · " + day, *[topic + "\n" + root + topic + "/" for topic in TOPICS]]
+            plan["text"] = "\n\n".join(sections[:-1])
+            with self.assertRaisesRegex(ValueError, "first_notice_requires_all_six_articles"):
+                self.q.admit(rid, bundle, "a"*40)
+            self.assertIsNone(self.store.db.execute("SELECT id FROM requests WHERE id=?", (rid,)).fetchone())
+            plan["text"] = "\n\n".join(sections)
+            if revision == 1:
+                pages = dict(previous=None, pending=[], added=list(TOPICS),
+                             articles=[dict(id=t, title=t, sha256="a" * 64) for t in TOPICS])
+                validate_first_notice(dict(plan, page_state=pages), self.q.config["notice_connector"]["report_base_url"])
+            self.q.admit(rid, bundle, "a"*40)
+        self.assertEqual(self.q.status("morning-20261119-r1")["phase"], "superseded")
+        self.assertEqual(self.q.status("morning-20261119-r2")["delivery_kind"], "initial")
+        self.assertEqual(self.calls, [])
 
     def test_unknown_revision_is_frozen_across_restart_and_other_days(self):
         self.finish_initial(); rid, _ = self.revise(); self.outcomes = [TimeoutError()]
