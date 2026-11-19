@@ -939,7 +939,12 @@ def _validate_audit(directory):
         research = calls.get("research")
         handoff, snapshot = _settled_research(research, read)
         settled_checks, settled_discovery, bound = {}, {}, {}
+        if not prior_checks and not {"candidates", "checks", "sources"} <= snapshot.keys():
+            blockers.append("complete_edition_required")
         if not prior_checks and "checks" in snapshot:
+            original_candidates = snapshot.get("candidates")
+            _require(isinstance(original_candidates, dict) and original_candidates.get("mode") == "live"
+                     and original_candidates.get("items") == candidates["items"], "Settled research candidates differ")
             originals = snapshot.get("sources")
             checks, discovery = snapshot["checks"], snapshot.get("discovery", {})
             _require(isinstance(checks, dict) and isinstance(discovery, dict) and isinstance(originals, list)
@@ -962,7 +967,11 @@ def _validate_audit(directory):
                     continue
                 attempts = original.get("attempt_records")
                 if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
-                    continue
+                    raise BriefError("Settled source attempts must be preserved")
+                if attempts:
+                    _require(community.cancelled_suffix_preserves_response(current, original)
+                             and (len(current["attempt_records"]) > len(attempts) or current == original),
+                             "Changed retained sources require an executed retry")
                 _require(ref not in bound, "Duplicate settled source identity")
                 if fingerprint is None:
                     if community.executed_source_status(original) != "ok":
@@ -1090,7 +1099,9 @@ def _validate_audit(directory):
                         discovered_reads.setdefault((query["family"], result["event_key"]), set()).update(
                             (ref, records[ref]["content_sha256"]) for ref in result["source_ids"]
                             if ref in records and community.executed_source_status(records[ref]) == "ok"
-                            and (not prior_checks or discovery is prior_discovery or (query["family"], ref) in resolved_topic_reads))
+                            and (not prior_checks or discovery is prior_discovery or
+                                 ((query["family"], query["source_id"]) in resolved_topic_reads and query["attempt"] >
+                                  len(retained_sources.get(query["source_id"], {}).get("attempt_records", [])))))
     supported_entries = True
     draft_sha = metadata["inputs"]["draft_sha256"]
     if draft_sha is None:

@@ -33,6 +33,7 @@ class CompleteEditionTests(unittest.TestCase):
     def settle_checks(self, case):
         attempt = case.audit["model_calls"][0]["attempt_records"][-1]
         snapshot = {key: case.audit[key] for key in ("checks", "sources", "discovery") if key in case.audit}
+        snapshot["candidates"] = case.candidates
         result = dict(stage="research", stage_status=attempt["status"], input_sha256=attempt["input_sha256"],
                       elapsed_seconds=attempt["elapsed_seconds"], output_sha256=case.artifact(original_audit.encoded(snapshot)))
         attempt["result_sha256"] = case.artifact(original_audit.encoded(result))
@@ -167,9 +168,10 @@ class CompleteEditionTests(unittest.TestCase):
         archived = body.with_name(source["content_sha256"] + ".txt")
         original = body.read_bytes()
         body.write_bytes(b"Updated official response")
+        source["content_sha256"] = hashlib.sha256(body.read_bytes()).hexdigest()
+        case.reject("Changed retained sources require an executed retry")
         source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
-        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"] * 2,
-                      content_sha256=hashlib.sha256(body.read_bytes()).hexdigest())
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"] * 2)
         with self.assertRaises(BriefError):
             case.check()
         archived.write_bytes(original)
@@ -282,10 +284,16 @@ class CompleteEditionTests(unittest.TestCase):
         output = self.artifact(original_audit.encoded(findings))
         result = dict(stage="research", status="success", stage_status="ok", input_sha256=attempt["input_sha256"],
                       elapsed_seconds=attempt["elapsed_seconds"], outputs=[dict(name="findings.json", sha256=output)])
-        result["output_sha256"] = self.artifact(original_audit.encoded({
-            "sources": self.audit["sources"], "checks": self.audit["checks"]}))
+        def bind_snapshot():
+            result["output_sha256"] = self.artifact(original_audit.encoded({
+                "sources": self.audit["sources"], "checks": self.audit["checks"], "candidates": self.candidates}))
+        bind_snapshot()
         attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
         self.assertEqual(self.check()["readiness"], "ready")
+        snapshot_digest = result.pop("output_sha256")
+        attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        result["output_sha256"] = snapshot_digest
         entry = self.draft["entries"][0]
         primary = next(src for src in self.audit["sources"] if src["id"] == "source")
         assignment = dict(article_id="inference-engines", event_key=entry["event_key"], primary_source_id="source",
@@ -346,6 +354,8 @@ class CompleteEditionTests(unittest.TestCase):
         entry["source_urls"] = [status_source["url"]]
         self.audit["status_entries"].append(dict(event_key=entry["event_key"], source_ids=[status_source["id"]],
                                                  reason="已核对当期状态"))
+        bind_snapshot()
+        bind_findings()
         self.assertEqual(self.check()["readiness"], "zero_items")
         self.audit["status_entries"].pop()
         entry["source_urls"] = original_urls
@@ -353,6 +363,8 @@ class CompleteEditionTests(unittest.TestCase):
         self.audit["coverage_policy"] = "publish_verified_with_gaps"
         source = layered.LayeredBudgetTests.failed(self, kind="transport")
         source["attempt_records"][0].update(status="failed", error=source["error"])
+        bind_snapshot()
+        bind_findings()
         partial = self.check()
         self.assertEqual(partial["readiness"], "partial")
         self.assertEqual(partial["blockers"], [])
