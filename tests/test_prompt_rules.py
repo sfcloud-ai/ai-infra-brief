@@ -124,14 +124,16 @@ class PromptRuleTests(unittest.TestCase):
         self.assertGreater(len(links), 15)
         hosts = {"github.com", "huggingface.co", "www.nvidia.com", "developer.nvidia.com",
                  "docs.nvidia.com", "qwen.ai", "ai.google.dev", "vllm.ai", "www.sglang.io",
-                 "www.lmsys.org", "www.deepseek.com", "z.ai", "qwenlm.github.io"}
+                 "www.lmsys.org", "www.deepseek.com", "z.ai", "qwenlm.github.io",
+                 "www.alibabacloud.com", "www.zhipuai.cn", "docs.z.ai"}
         for link in links:
             parsed = urlsplit(link)
             self.assertEqual(parsed.scheme, "https")
             self.assertIn(parsed.hostname, hosts)
             self.assertIsNone(parsed.username)
             self.assertIsNone(parsed.password)
-            self.assertFalse(parsed.query)
+            if parsed.query:
+                self.assertEqual(link, "https://qwen.ai/blog?id=qwen4-max")
 
     def test_official_blog_and_technical_article_entries_are_explicit(self):
         sources = (PROMPTS / "sources.md").read_text(encoding="utf-8")

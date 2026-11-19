@@ -30,9 +30,9 @@ def read_result(data, request):
     result = json.loads(data.decode("utf-8"), object_pairs_hook=unique)
     sent = json.loads(request.decode("utf-8"), object_pairs_hook=unique)
     require(isinstance(result, dict) and isinstance(sent, dict))
-    if result.get("status") == "rejected":
+    if result.get("error") == "first_notice_requires_all_six_articles":
         require(sent.get("action") == "admit" and result == {
-            "status":"rejected", "error":"first_notice_requires_all_six_articles",
+            "status":"not_verified", "error":"first_notice_requires_all_six_articles",
             "request_id":sent["request_id"], "report_commit":sent["report_commit"],
             "bundle_sha256":hashlib.sha256(base64.b64decode(sent["bundle_base64"], validate=True)).hexdigest()})
         return result

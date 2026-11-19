@@ -929,6 +929,51 @@ def _validate_audit(directory):
     if set(calls) != {"research", "editor"}:
         blockers.append("model_stage_missing")
 
+    first_edition = previous_report is None and require_complete_first
+    if first_edition:
+        research = calls.get("research")
+        handoff, snapshot = _settled_research(research, read)
+        settled_checks, settled_discovery, bound = {}, {}, {}
+        if not prior_checks and "checks" in snapshot:
+            originals = snapshot.get("sources")
+            checks, discovery = snapshot["checks"], snapshot.get("discovery", {})
+            _require(isinstance(checks, dict) and isinstance(discovery, dict) and isinstance(originals, list)
+                     and all(isinstance(item, dict) for item in checks.values()), "Invalid settled topic evidence")
+            settled_checks = {key: dict(item) for key, item in checks.items()}
+            for item in settled_checks.values():
+                if "detail" in item:
+                    _require("reason" not in item, "Ambiguous original coverage explanation")
+                    item["reason"] = item.pop("detail")
+            validation = dict(metadata, checks=settled_checks, sources=originals)
+            if "discovery" in snapshot:
+                validation["discovery"] = discovery
+            validate("research-audit", validation)
+            settled_discovery = discovery
+            for original in originals:
+                ref, fingerprint = original["id"], original["content_sha256"]
+                current = sources.get(ref)
+                if not (current and current["url"] == original["url"] and community.executed_source_status(original) == "ok"
+                        and isinstance(fingerprint, str) and re.fullmatch(r"[a-f0-9]{64}", fingerprint)):
+                    continue
+                attempts = original.get("attempt_records")
+                if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
+                    continue
+                if fingerprint == current["content_sha256"]:
+                    text = source_text[ref]
+                else:
+                    relative = f"evidence/{fingerprint}.txt"
+                    if not (root / relative).is_file():
+                        continue
+                    raw = read(relative, MAX_PACKAGE_BYTES)
+                    _require(hashlib.sha256(raw).hexdigest() == fingerprint, "Original source response fingerprint mismatch")
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise BriefError("Original source response must be UTF-8") from exc
+                _require(bool(text.strip()), "Original successful source evidence is empty")
+                bound[ref] = retained_sources[ref] = original
+                retained_source_text[ref] = text
+
     validate_current_outputs(metadata, candidates, read, _require, _json)
     by_event = {}
     for candidate in candidates["items"]:
@@ -947,7 +992,7 @@ def _validate_audit(directory):
         versions.extend((retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
                         for s in linked if s["id"] in retained_sources)
         candidate_versions = [(retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
-                              for s in linked if s["id"] in retained_sources] if retained_sources else versions
+                              for s in linked if s["id"] in retained_sources] if prior_checks else versions
         matching = [(s, text) for s, text in candidate_versions if community.executed_source_status(s) == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
@@ -1010,28 +1055,13 @@ def _validate_audit(directory):
         _require(linked and all(community.executed_source_status(source) == "ok" for source in linked),
                  "Coverage status requires successful source evidence")
         status_entries[key] = entry
-    first_edition = previous_report is None and require_complete_first
     topic_reads, discovered_reads = {}, {}
     if first_edition:
         check_tables = ((metadata["checks"], sources), (prior_checks, retained_sources))
         discovery_tables = ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources))
-        research = calls.get("research")
-        handoff, snapshot = _settled_research(research, read)
-        if research and not prior_checks and (research["status"] == "partial" or "checks" in snapshot):
-            originals = snapshot.get("sources", [])
-            _require(isinstance(originals, list), "Original research sources must be a list")
-            bound = {}
-            for original in originals:
-                if not isinstance(original, dict) or not isinstance(original.get("id"), str):
-                    continue
-                ref = original["id"]
-                current = sources.get(ref)
-                if (current and original.get("url") == current["url"] and original.get("content_sha256") == current["content_sha256"]
-                        and community.executed_source_status(original) == "ok"):
-                    bound[ref] = current
-            checks, discovery = snapshot.get("checks", {}), snapshot.get("discovery", {})
-            _require(isinstance(checks, dict) and isinstance(discovery, dict), "Invalid settled topic evidence")
-            check_tables, discovery_tables = ((checks, bound),), ((discovery, bound),)
+        if not prior_checks:
+            check_tables = ((settled_checks, bound),)
+            discovery_tables = ((settled_discovery, bound),)
         for page, checks in page_checks.items():
             topic_reads[page] = {(ref, records[ref]["content_sha256"])
                                 for table, records in check_tables

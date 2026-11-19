@@ -84,6 +84,13 @@ class RequiredCoverageTests(unittest.TestCase):
             self.assertFalse(source_matches("qwen_blog", url), url)
         self.assertFalse(source_matches("glm_blog", "https://qwen.ai/research"))
 
+    def test_glm_research_and_release_readbacks_match_the_official_channel(self):
+        for url in ("https://www.zhipuai.cn/zh/research", "https://docs.z.ai/release-notes/new-released.md"):
+            self.assertTrue(source_matches("glm_blog", url))
+        for url in ("https://www.zhipuai.cn/zh/services", "https://docs.z.ai/sign-in",
+                    "https://www.zhipuai.cn.example/zh/research"):
+            self.assertFalse(source_matches("glm_blog", url))
+
     def test_every_required_direction_and_source_group_must_exist(self):
         for name in REQUIRED_CHECKS:
             value = self.audit["checks"].pop(name)

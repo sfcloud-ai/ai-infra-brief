@@ -30,6 +30,13 @@ class CompleteEditionTests(unittest.TestCase):
         source["url"] = case.candidates["items"][0]["source_url"] = uri
         case.draft["entries"][0]["source_urls"] = [uri]
 
+    def settle_checks(self, case):
+        attempt = case.audit["model_calls"][0]["attempt_records"][-1]
+        snapshot = {key: case.audit[key] for key in ("checks", "sources", "discovery") if key in case.audit}
+        result = dict(stage="research", stage_status=attempt["status"], input_sha256=attempt["input_sha256"],
+                      elapsed_seconds=attempt["elapsed_seconds"], output_sha256=case.artifact(original_audit.encoded(snapshot)))
+        attempt["result_sha256"] = case.artifact(original_audit.encoded(result))
+
     def discovery_edition(self):
         case = community.CommunityDiscoveryTests("runTest")
         case.setUp()
@@ -132,6 +139,7 @@ class CompleteEditionTests(unittest.TestCase):
 
         for key in ids:
             pad(key, 11_000_000)
+        self.settle_checks(case)
         self.assertEqual(case.check()["readiness"], "ready")
         prompt = case.root / "prompts" / "audit.md"
         current = prompt.read_bytes()
@@ -149,6 +157,33 @@ class CompleteEditionTests(unittest.TestCase):
         pad(ids[1], len(original[ids[1]]))
         pad(ids[0], 20_000_001)
         case.reject("Audit file exceeds size limit")
+
+    def test_topic_uses_archived_original_after_a_successful_reread(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        self.settle_checks(case)
+        source = next(s for s in case.audit["sources"] if s["id"] == "source")
+        body = case.root / "evidence/source.txt"
+        archived = body.with_name(source["content_sha256"] + ".txt")
+        original = body.read_bytes()
+        body.write_bytes(b"Updated official response")
+        source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"] * 2,
+                      content_sha256=hashlib.sha256(body.read_bytes()).hexdigest())
+        with self.assertRaises(BriefError):
+            case.check()
+        archived.write_bytes(original)
+        self.assertEqual(case.check()["readiness"], "ready")
+        archived.write_bytes(b"wrong original")
+        case.reject("Original source response fingerprint mismatch")
+
+    def test_invalid_nested_settled_check_gives_an_audit_error(self):
+        case = self.discovery_edition()
+        hardware = case.audit["checks"]["hardware"]
+        case.audit["checks"]["hardware"] = None
+        self.settle_checks(case)
+        case.audit["checks"]["hardware"] = hardware
+        case.reject("Invalid settled topic evidence")
 
     def test_former_single_page_is_blocked_under_current_contract(self):
         scoped.PageScopeTests.setUp(self)
@@ -208,15 +243,19 @@ class CompleteEditionTests(unittest.TestCase):
         self.draft.update(title="合成晨报", subtitle="合成副标题", images=[], poster="assets/overview.png")
         self.assertIn("complete_edition_required", self.check()["blockers"])
         self.draft["schema_version"] = "1.0"
+        self.assertIn("complete_edition_required", self.check()["blockers"])
+        self.settle_checks(self)
         self.assertEqual(self.check()["readiness"], "ready")
         alternate = deepcopy(next(s for s in self.audit["sources"] if s["id"] == "source"))
         alternate.update(id="other-read", content_sha256=hashlib.sha256(b"Other response").hexdigest())
         (self.root / "evidence/other-read.txt").write_bytes(b"Other response")
         self.audit["sources"].append(alternate)
         refs[refs.index("source")] = "other-read"
+        self.settle_checks(self)
         self.assertIn("complete_edition_required", self.check()["blockers"])
         refs[refs.index("other-read")] = "source"
         self.audit["sources"].remove(alternate)
+        self.settle_checks(self)
         self.draft["revision_notice"] = {}
         self.assertIn("complete_edition_required", self.check()["blockers"])
         self.draft.pop("revision_notice")
@@ -234,6 +273,8 @@ class CompleteEditionTests(unittest.TestCase):
         output = self.artifact(original_audit.encoded(findings))
         result = dict(stage="research", status="success", stage_status="ok", input_sha256=attempt["input_sha256"],
                       elapsed_seconds=attempt["elapsed_seconds"], outputs=[dict(name="findings.json", sha256=output)])
+        result["output_sha256"] = self.artifact(original_audit.encoded({
+            "sources": self.audit["sources"], "checks": self.audit["checks"]}))
         attempt["result_sha256"] = self.artifact(original_audit.encoded(result))
         self.assertEqual(self.check()["readiness"], "ready")
         entry = self.draft["entries"][0]

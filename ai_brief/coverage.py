@@ -64,6 +64,11 @@ def source_matches(check, url):
     if check in repo:
         return github(repo[check])
     if check in {"vllm_blog", "sglang_blog", "lmsys_blog", "glm_blog", "qwen_blog"}:
+        if check == "glm_blog" and (
+            (host == "www.zhipuai.cn" and path == "/zh/research")
+            or (host == "docs.z.ai" and path == "/release-notes/new-released.md")
+        ):
+            return True
         if check == "vllm_blog" and github("vllm-project/vllm-project.github.io"):
             return not any(segment in path.casefold().split("/") for segment in
                            ("search", "issues", "issue", "pulls", "pull", "commits", "commit", "releases"))

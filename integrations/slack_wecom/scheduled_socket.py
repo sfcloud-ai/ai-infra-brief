@@ -46,7 +46,7 @@ def dispatch(data, queue, can_admit=lambda: True):
     try:
         return queue.admit(request["request_id"],bundle,request["report_commit"])
     except FirstNoticeIncomplete:
-        return {"status":"rejected","error":"first_notice_requires_all_six_articles",
+        return {"status":"not_verified","error":"first_notice_requires_all_six_articles",
                 "request_id":request["request_id"],"report_commit":request["report_commit"],
                 "bundle_sha256":hashlib.sha256(bundle).hexdigest()}
 
