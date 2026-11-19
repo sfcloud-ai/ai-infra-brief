@@ -89,6 +89,14 @@ class SourceFollowupTests(unittest.TestCase):
         self.assertEqual(result["next_requests"], [])
         self.assertEqual([g["reason"] for g in result["gaps"]], ["discovery_page_limit"] * 2)
 
+    def test_required_repository_search_can_follow_merge_pages_beyond_discovery_limit(self):
+        for project in ("vllm-project/vllm", "sgl-project/sglang", "deepseek-ai/DeepInfer"):
+            base = f"https://api.github.com/search/issues?q=repo:{project}+is:pr+is:merged&per_page=20&page="
+            self.receipt(base + "2", {"items": [], "incomplete_results": False}, base + "3")
+        result = self.follow()
+        self.assertEqual(len(result["next_requests"]), 3)
+        self.assertFalse(result["gaps"])
+
     def test_failed_and_missing_pages_remain_gaps_and_official_alternates_need_reads(self):
         self.receipt(self.start, [self.article], self.next_page)
         self.receipt(self.next_page, [], status=403)

@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import re
 from urllib.parse import parse_qsl, urljoin, urlsplit
+from .coverage import source_matches
 from .source_identity import canonical_source_url, source_identity
 
 
@@ -222,7 +223,8 @@ def _source_followup(ledger_path, operations_dir, since):
                 origin, target = urlsplit(effective), urlsplit(link)
                 if origin.hostname == "api.github.com" and target.path != origin.path:
                     numeric_paths[target.path].add(origin.path)
-                if origin.hostname == "api.github.com" and origin.path in {"/search/issues", "/search/repositories"}:
+                if (origin.hostname == "api.github.com" and origin.path in {"/search/issues", "/search/repositories"}
+                        and not any(source_matches(name, effective) for name in ("vllm", "sglang", "deepinfer"))):
                     page = [v for k, v in parse_qsl(target.query, keep_blank_values=True) if k == "page"]
                     if page not in (["1"], ["2"]):
                         gaps.append({"operation_id": oid, "url": link, "reason": "discovery_page_limit"})
