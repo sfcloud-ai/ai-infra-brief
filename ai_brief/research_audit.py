@@ -78,7 +78,14 @@ def _topic_handoff(call, read):
     result = _json(raw, "research result")
     if not isinstance(result, dict) or not isinstance(result.get("outputs", []), list):
         return {}
-    matches = [item.get("sha256") for item in result.get("outputs", []) if isinstance(item, dict) and item.get("name") == "findings.json"]
+    matches = []
+    for item in result.get("outputs", []):
+        if not isinstance(item, dict):
+            continue
+        labels = [item[k].replace("\\", "/").rsplit("/", 1)[-1] for k in ("name", "path") if isinstance(item.get(k), str)]
+        if "findings.json" in labels:
+            _require(all(label == "findings.json" for label in labels), "Conflicting research findings descriptor")
+            matches.append(item.get("sha256"))
     if not matches and result.get("output_sha256"):
         matches = [result["output_sha256"]]
     if not matches:

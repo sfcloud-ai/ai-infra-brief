@@ -236,6 +236,15 @@ class CompleteEditionTests(unittest.TestCase):
         assignment["article_id"] = entry["article_id"]
         bind_findings()
         self.assertEqual(self.check()["readiness"], "ready")
+        descriptor = result["outputs"][0]
+        descriptor["path"] = "research/outputs/" + descriptor.pop("name")
+        bind_findings()
+        self.assertEqual(self.check()["readiness"], "ready")
+        descriptor["name"] = "candidates.json"
+        bind_findings()
+        with self.assertRaisesRegex(BriefError, "Conflicting research findings descriptor"):
+            self.check()
+        del descriptor["name"]
         for field, other in (("url", official["url"]), ("content_sha256", "a" * 64)):
             assignment[field] = other
             bind_findings()
