@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 
-from test_relay_integration import ROOT, relay, relay_fixtures
+from test_relay_integration import ROOT, NOTICE_CONFIG, relay, relay_fixtures
 from deploy.relay_resume import binding
 from deploy.supervisor import DockerDriver, ServiceError
 
@@ -57,11 +57,11 @@ def synthetic_runtime(messages, flags=()):
         for name in ("state", "run", "secrets"):
             (root / name).mkdir(mode=0o700)
         config = root / "config.json"
-        config.write_text(json.dumps(relay_fixtures.CONFIG))
+        config.write_text(json.dumps(NOTICE_CONFIG))
         config.chmod(0o600)
         store = relay.Store(root / "state")
         store.set("cursor", relay_fixtures.ts(1))
-        store.set("handoff_binding_v1", binding(relay_fixtures.CONFIG))
+        store.set("handoff_binding_v1", binding(NOTICE_CONFIG))
         store.db.close()
         (root / "queue.json").write_text(json.dumps(messages))
         for flag in flags:
@@ -156,11 +156,11 @@ class RuntimeSocketTests(unittest.TestCase):
             for name in ("state", "run", "secrets"):
                 (root / name).mkdir(mode=0o700)
             config = root / "config.json"
-            config.write_text(json.dumps(relay_fixtures.CONFIG))
+            config.write_text(json.dumps(NOTICE_CONFIG))
             config.chmod(0o600)
             store = relay.Store(root / "state")
             store.set("cursor", relay_fixtures.ts(1))
-            store.set("handoff_binding_v1", binding(relay_fixtures.CONFIG))
+            store.set("handoff_binding_v1", binding(NOTICE_CONFIG))
             store.db.close()
             queue = root / "queue.json"
             queue.write_text(json.dumps([relay_fixtures.brief(2)]))
