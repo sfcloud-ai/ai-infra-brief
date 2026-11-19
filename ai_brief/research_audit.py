@@ -121,7 +121,7 @@ def _settled_research(call, read):
 
 def _assigned_primary_matches(assignment, findings, url, reads, settled_sources):
     source_id = assignment.get("primary_source_id")
-    if not isinstance(source_id, str):
+    if not isinstance(source_id, str) or source_id not in settled_sources:
         return False
     records = findings.get("source_records", findings.get("sources", []))
     if isinstance(records, dict):
@@ -131,8 +131,7 @@ def _assigned_primary_matches(assignment, findings, url, reads, settled_sources)
     else:
         return False
     records.append(assignment)
-    if source_id in settled_sources:
-        records.append(settled_sources[source_id])
+    records.append(settled_sources[source_id])
     # 原生操作回执保留 body_sha256，URL 保存在同一研究结算的 sources 表中。
     if not all(isinstance(record, dict) for record in records):
         return False
@@ -959,6 +958,9 @@ def _validate_audit(directory):
             if "discovery" in snapshot:
                 validation["discovery"] = discovery
             validate("research-audit", validation)
+            _require(all(metadata["checks"][name]["status"] in {"failed", "not_checked"}
+                         for name, check in settled_checks.items() if check["status"] in {"failed", "not_checked"}),
+                     "Completing a settled coverage gap requires verified coverage resolution")
             settled_discovery = discovery
             for original in originals:
                 ref, fingerprint = original["id"], original["content_sha256"]
@@ -981,8 +983,6 @@ def _validate_audit(directory):
                     text = source_text[ref]
                 else:
                     relative = f"evidence/{fingerprint}.txt"
-                    if not (root / relative).is_file():
-                        continue
                     raw = read(relative, MAX_PACKAGE_BYTES)
                     _require(hashlib.sha256(raw).hexdigest() == fingerprint, "Original source response fingerprint mismatch")
                     try:
@@ -1166,7 +1166,10 @@ def _validate_audit(directory):
                             if not isinstance(item, dict) or item.get("source_id") not in binding["source_ids"]:
                                 continue
                             ref = item["source_id"]
-                            for records in (sources, retained_sources):
+                            versions = [retained_sources]
+                            if any((check, ref) in resolved_topic_reads for check in page_checks[page]):
+                                versions.append(sources)
+                            for records in versions:
                                 version = records.get(ref)
                                 if (version and community.executed_source_status(version) == "ok"
                                         and (version["url"], version["content_sha256"]) == (item.get("url"), item.get("content_sha256"))):

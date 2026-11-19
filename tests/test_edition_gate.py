@@ -113,18 +113,18 @@ class CompleteEditionTests(unittest.TestCase):
         case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
         self.assertIn("complete_edition_required", case.check()["blockers"])
         del call["coverage_resolution"]
-        self.assertIn("complete_edition_required", case.check()["blockers"])
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
         findings = {"page_status_sources": {}}
         result["outputs"] = [{"name": "findings.json", "sha256": case.artifact(original_audit.encoded(findings))}]
         case.bind_retained_output(output, result, call)
         read = lambda name, limit: (case.root / name).read_bytes()
         self.assertEqual(_settled_research(call, read), (findings, output))
-        self.assertIn("complete_edition_required", case.check()["blockers"])
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
         del result["outputs"]
         output["findings"] = findings
         case.bind_retained_output(output, result, call)
         self.assertEqual(_settled_research(call, read), (findings, output))
-        self.assertIn("complete_edition_required", case.check()["blockers"])
+        case.reject("Completing a settled coverage gap requires verified coverage resolution")
 
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
         case = self.discovery_edition()
