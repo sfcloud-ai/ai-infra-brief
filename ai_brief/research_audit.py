@@ -950,6 +950,7 @@ def _validate_audit(directory):
                     _require("reason" not in item, "Ambiguous original coverage explanation")
                     item["reason"] = item.pop("detail")
             validation = dict(metadata, checks=settled_checks, sources=originals)
+            _require(not discovery_contract or "discovery" in snapshot, "Settled discovery snapshot required")
             if "discovery" in snapshot:
                 validation["discovery"] = discovery
             validate("research-audit", validation)
@@ -957,11 +958,15 @@ def _validate_audit(directory):
             for original in originals:
                 ref, fingerprint = original["id"], original["content_sha256"]
                 current = sources.get(ref)
-                if not (current and current["url"] == original["url"] and community.executed_source_status(original) == "ok"
-                        and isinstance(fingerprint, str) and re.fullmatch(r"[a-f0-9]{64}", fingerprint)):
+                if not (current and current["url"] == original["url"]):
                     continue
                 attempts = original.get("attempt_records")
                 if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
+                    continue
+                _require(ref not in bound, "Duplicate settled source identity")
+                if fingerprint is None:
+                    if community.executed_source_status(original) != "ok":
+                        bound[ref] = original
                     continue
                 if fingerprint == current["content_sha256"]:
                     text = source_text[ref]
@@ -975,9 +980,13 @@ def _validate_audit(directory):
                         text = raw.decode("utf-8")
                     except UnicodeError as exc:
                         raise BriefError("Original source response must be UTF-8") from exc
-                _require(bool(text.strip()), "Original successful source evidence is empty")
+                if community.executed_source_status(original) == "ok":
+                    _require(bool(text.strip()), "Original successful source evidence is empty")
                 bound[ref] = retained_sources[ref] = original
                 retained_source_text[ref] = text
+            if discovery_contract:
+                community.validate_discovery(validation, bound, retained_source_text, candidates, history,
+                                             _require, _time, discovery_read, previous_metadata)
 
     validate_current_outputs(metadata, candidates, read, _require, _json)
     by_event = {}

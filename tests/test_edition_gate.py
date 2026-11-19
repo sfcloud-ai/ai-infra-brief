@@ -185,6 +185,15 @@ class CompleteEditionTests(unittest.TestCase):
         case.audit["checks"]["hardware"] = hardware
         case.reject("Invalid settled topic evidence")
 
+    def test_settled_discovery_cannot_credit_an_unrelated_source(self):
+        case = self.discovery_edition()
+        check = case.audit["checks"]["discovery_data_path"]
+        original = check["source_ids"]
+        check["source_ids"] = ["coverage-small_models"]
+        self.settle_checks(case)
+        check["source_ids"] = original
+        case.reject("Discovery check must bind its current-window queries")
+
     def test_former_single_page_is_blocked_under_current_contract(self):
         scoped.PageScopeTests.setUp(self)
         self.marker()
