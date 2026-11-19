@@ -5,7 +5,7 @@ import unittest
 from copy import deepcopy
 
 from ai_brief.contracts import RESOURCE_ROOT
-from ai_brief.research_audit import PAGE_CHECKS, _topic_handoff
+from ai_brief.research_audit import PAGE_CHECKS, _settled_research
 from ai_brief.storage import BriefError
 from tests import test_community_discovery as community
 from tests import test_layered_budget as layered
@@ -105,6 +105,17 @@ class CompleteEditionTests(unittest.TestCase):
         case.audit["checks"]["embodied_training"]["source_ids"].append(hardware["id"])
         self.assertIn("complete_edition_required", case.check()["blockers"])
         del call["coverage_resolution"]
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+        findings = {"page_status_sources": {}}
+        result["outputs"] = [{"name": "findings.json", "sha256": case.artifact(original_audit.encoded(findings))}]
+        case.bind_retained_output(output, result, call)
+        read = lambda name, limit: (case.root / name).read_bytes()
+        self.assertEqual(_settled_research(call, read), (findings, output))
+        self.assertIn("complete_edition_required", case.check()["blockers"])
+        del result["outputs"]
+        output["findings"] = findings
+        case.bind_retained_output(output, result, call)
+        self.assertEqual(_settled_research(call, read), (findings, output))
         self.assertIn("complete_edition_required", case.check()["blockers"])
 
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
@@ -254,7 +265,7 @@ class CompleteEditionTests(unittest.TestCase):
             assignment[field] = primary[field]
         result["stage_status"] = attempt["status"] = call["status"] = "partial"
         bind_findings()
-        self.assertEqual(_topic_handoff(call, lambda name, limit: (self.root / name).read_bytes()), findings)
+        self.assertEqual(_settled_research(call, lambda name, limit: (self.root / name).read_bytes())[0], findings)
         attempt["status"] = call["status"] = "ok"
         result["stage_status"] = "failed"
         bind_findings()

@@ -66,18 +66,18 @@ def _require(condition, message):
         raise BriefError(message)
 
 
-def _topic_handoff(call, read):
-    """读取已结算研究结果中的专题归属和状态来源。"""
+def _settled_research(call, read):
+    """读取同一次结算中的专题交接及覆盖快照，各自校验原件摘要。"""
     if not call or call["status"] not in {"ok", "partial"} or not call.get("attempt_records"):
-        return {}
+        return {}, {}
     attempt = call["attempt_records"][-1]
     digest = attempt.get("result_sha256")
     if not digest:
-        return {}
+        return {}, {}
     raw = read(f"stage_artifacts/{digest}.json", MAX_PACKAGE_BYTES)
     result = _json(raw, "research result")
     if not isinstance(result, dict) or not isinstance(result.get("outputs", []), list):
-        return {}
+        return {}, {}
     matches = []
     for item in result.get("outputs", []):
         if not isinstance(item, dict):
@@ -89,7 +89,7 @@ def _topic_handoff(call, read):
     if not matches and result.get("output_sha256"):
         matches = [result["output_sha256"]]
     if not matches:
-        return {}
+        return {}, {}
     status = result.get("stage_status", result.get("status"))
     _require(hashlib.sha256(raw).hexdigest() == digest and result.get("stage") == "research"
              and result.get("input_sha256") == attempt["input_sha256"]
@@ -99,14 +99,24 @@ def _topic_handoff(call, read):
              "Research findings must match the settled research attempt")
     data = read(f"stage_artifacts/{matches[0]}.json", MAX_PACKAGE_BYTES)
     _require(hashlib.sha256(data).hexdigest() == matches[0], "Research findings fingerprint mismatch")
-    findings = _json(data, "research findings")
+    document = _json(data, "research findings")
+    snapshot = document
+    snapshot_sha = result.get("output_sha256")
+    if snapshot_sha is not None and snapshot_sha != matches[0]:
+        _require(isinstance(snapshot_sha, str) and re.fullmatch(r"[a-f0-9]{64}", snapshot_sha),
+                 "Invalid settled research snapshot fingerprint")
+        raw_snapshot = read(f"stage_artifacts/{snapshot_sha}.json", MAX_PACKAGE_BYTES)
+        _require(hashlib.sha256(raw_snapshot).hexdigest() == snapshot_sha, "Research snapshot fingerprint mismatch")
+        snapshot = _json(raw_snapshot, "research coverage snapshot")
+    _require(isinstance(snapshot, dict), "Invalid settled research snapshot")
+    findings = document
     if isinstance(findings, dict):
         findings = findings.get("findings", findings)
     _require(isinstance(findings, dict) and isinstance(findings.get("candidate_bindings_and_decisions", []), list)
              and isinstance(findings.get("page_status_sources", {}), dict)
              and all(page in PAGE_CHECKS and isinstance(items, list) for page, items in findings.get("page_status_sources", {}).items()),
              "Invalid research topic handoff")
-    return findings
+    return findings, snapshot
 
 
 def _assigned_primary_matches(assignment, findings, url, reads):
@@ -1002,14 +1012,13 @@ def _validate_audit(directory):
         status_entries[key] = entry
     first_edition = previous_report is None and require_complete_first
     topic_reads, discovered_reads = {}, {}
-    handoff = None
     if first_edition:
         check_tables = ((metadata["checks"], sources), (prior_checks, retained_sources))
         discovery_tables = ((metadata.get("discovery", {}), sources), (prior_discovery, retained_sources))
         research = calls.get("research")
-        if research and research["status"] == "partial" and not prior_checks:
-            handoff = _topic_handoff(research, read)
-            originals = handoff.get("sources", [])
+        handoff, snapshot = _settled_research(research, read)
+        if research and not prior_checks and (research["status"] == "partial" or "checks" in snapshot):
+            originals = snapshot.get("sources", [])
             _require(isinstance(originals, list), "Original research sources must be a list")
             bound = {}
             for original in originals:
@@ -1017,10 +1026,10 @@ def _validate_audit(directory):
                     continue
                 ref = original["id"]
                 current = sources.get(ref)
-                if (current and original.get("status") == "ok" and original.get("url") == current["url"]
-                        and original.get("content_sha256") == current["content_sha256"]):
+                if (current and original.get("url") == current["url"] and original.get("content_sha256") == current["content_sha256"]
+                        and community.executed_source_status(original) == "ok"):
                     bound[ref] = current
-            checks, discovery = handoff.get("checks", {}), handoff.get("discovery", {})
+            checks, discovery = snapshot.get("checks", {}), snapshot.get("discovery", {})
             _require(isinstance(checks, dict) and isinstance(discovery, dict), "Invalid settled topic evidence")
             check_tables, discovery_tables = ((checks, bound),), ((discovery, bound),)
         for page, checks in page_checks.items():
@@ -1097,8 +1106,6 @@ def _validate_audit(directory):
                     allowed = set(topic_reads[page])
                     for check in page_checks[page]:
                         allowed.update(discovered_reads.get((check, key), ()))
-                    if handoff is None:
-                        handoff = _topic_handoff(calls.get("research"), read)
                     if status:
                         for item in handoff.get("page_status_sources", {}).get(page, []):
                             if not isinstance(item, dict) or item.get("source_id") not in binding["source_ids"]:

@@ -208,9 +208,14 @@ class DockerDriver:
             if (not ready.is_file() or ready.is_symlink()
                     or json.loads(ready.read_text()).get("commit") != release):
                 raise ServiceError("release_not_retained_or_ready")
-        result = self.one_shot(["capabilities", "--code", code], readonly_state=True,
-                               runtime=self.runtime(release))
-        if json.loads(result.stdout) != {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0}:
+        options = ["capabilities", "--code", code]
+        if getattr(self, "scheduler", None) is None:
+            options.extend(["--root", "/relay"])
+        result = self.one_shot(options, readonly_state=True, runtime=self.runtime(release))
+        capabilities = json.loads(result.stdout)
+        if capabilities.get("error") == "notice_connector_or_scheduler_required":
+            raise ServiceError("notice_connector_or_scheduler_required")
+        if capabilities != {"relay": True, "resume": True, "pause_activate": True, "messages_sent": 0}:
             raise ServiceError("release_capabilities_failed")
         if self.live.get("notice_service"):
             notice_service.preflight(release)
