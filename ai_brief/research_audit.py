@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .contracts import parse_time, validate
 from .storage import BriefError
 from .source_identity import source_identity
+from .edition_migration import migration_digest
 from .archive_followup import mentions_source, require_uncited, validate_archive_followup
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 from . import discovery as community
@@ -161,10 +162,10 @@ def _url(value):
     _require(valid, "Source URL must be HTTP(S), with a hostname and no credentials")
 
 
-def validate_audit(directory):
+def validate_audit(directory, *, edition_migration=None):
     """验证文件绑定及审计一致性；所有文件错误均隐去私有路径。"""
     try:
-        return _validate_audit(directory)
+        return _validate_audit(directory, edition_migration)
     except (OSError, RuntimeError) as exc:
         raise BriefError("Cannot read private audit package") from exc
 
@@ -197,7 +198,7 @@ class _SourceTexts:
         return self.read(relative, MAX_PACKAGE_BYTES).decode("utf-8")
 
 
-def _validate_audit(directory):
+def _validate_audit(directory, edition_migration=None):
     """只读检查；通过不等于证实事实或允许公开私有材料。"""
     root = Path(directory).resolve(strict=True)
     total = 0
@@ -389,7 +390,12 @@ def _validate_audit(directory):
     audit_prompt = read("prompts/audit.md")
     whole_edition = b"Group-Delivery: complete_six_topics_v1" in audit_prompt.splitlines()
     require_complete_first = whole_edition or metadata["date"] >= "2026-11-19"
-    if whole_edition and layered_budget and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines():
+    frozen_cap = whole_edition and layered_budget and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines()
+    adopted = None
+    if edition_migration is not None:
+        _require(frozen_cap and page_scope is None, "Migration requires the original whole-edition policy")
+        adopted = migration_digest(edition_migration, metadata, audit_prompt)
+    elif frozen_cap:
         raise BriefError("Frozen whole-edition policy requires its pinned verifier or an explicit same-run migration")
     legacy_limit = not (whole_edition and layered_budget)
     _require(not legacy_limit or total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
@@ -709,7 +715,7 @@ def _validate_audit(directory):
                      "Failed source needs an error, not a successful content fingerprint")
         if "archive_followup" in source:
             _require(whole_edition and layered_budget and page_scope is None and discovery_contract
-                     and b"Evidence-Package: streamed_whole_edition_v1" in audit_prompt.splitlines(),
+                     and (adopted or b"Evidence-Package: streamed_whole_edition_v1" in audit_prompt.splitlines()),
                      "Archive followup requires the streamed whole-edition contract")
             validate_archive_followup(source, metadata, candidates, read, _json)
         elif source["content_sha256"] is not None:
@@ -1244,6 +1250,8 @@ def _validate_audit(directory):
                  for source in sources.values() if "archive_followup" in source]
     if followups:
         result["archive_followups"] = followups
+    if adopted:
+        result["edition_migration_sha256"] = adopted
     if layered_budget:
         result.update(evidence_metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
                       budget_accounting=accounting, run_elapsed_seconds=run_elapsed,

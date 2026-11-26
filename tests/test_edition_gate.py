@@ -162,6 +162,23 @@ class CompleteEditionTests(unittest.TestCase):
         pad(ids[0], 20_000_001)
         case.reject("Audit file exceeds size limit")
 
+    def test_migration_cannot_enable_a_different_policy_or_an_unbound_receipt(self):
+        from ai_brief.research_audit import validate_audit
+        case = self.discovery_edition()
+        self.settle_checks(case)
+        case.save()
+        receipt = case.root / "private-receipt.json"
+        receipt.write_bytes(b"{}")
+        with self.assertRaisesRegex(BriefError, "requires the original"):
+            validate_audit(case.root, edition_migration=receipt)
+        prompt = case.root / "prompts" / "audit.md"
+        data = prompt.read_bytes().replace(b"streamed_whole_edition_v1", b"whole_edition_32mb_v1")
+        prompt.write_bytes(data)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(data).hexdigest()
+        case.save()
+        with self.assertRaisesRegex(BriefError, "Invalid same-run"):
+            validate_audit(case.root, edition_migration=receipt)
+
     def test_uncited_pdf_followup_preserves_actual_get_and_cannot_supply_evidence(self):
         case = self.discovery_edition()
         case.audit["checks"]["model_serving"]["source_ids"].append("source")
