@@ -824,6 +824,31 @@ class ModelContinuationAuditTests(LayeredBudgetTests):
         self.candidates["notes"] = ["Not the model output"]
         self.reject("bind final candidates")
 
+    def test_continuation_verifies_large_declared_outputs_sequentially(self):
+        import tracemalloc
+        hashes = []
+        for index in range(12):
+            data = bytes([65 + index]) * 4_000_000
+            hashes.append(self.artifact(data))
+        del data
+        candidates = {"mode": "live", "items": []}
+        hashes.append(self.js({"candidates": candidates}))
+        result = self.js({"outputs": [{"sha256": digest} for digest in hashes]})
+        attempt = {"status": "ok", "result_sha256": result, "prepublication_continuation_sha256": "a"*64}
+        metadata = {"model_calls": [{"stage": "research", "attempt_records": [attempt]}],
+                    "inputs": {"candidates_sha256": "b"*64}}
+        def read(path, limit):
+            return (self.root / path).read_bytes()
+        tracemalloc.start()
+        try:
+            validate_current_outputs(metadata, candidates, read, _require, _json)
+            self.assertLess(tracemalloc.get_traced_memory()[1], 24_000_000)
+        finally:
+            tracemalloc.stop()
+        (self.root / "stage_artifacts" / (hashes[3] + ".json")).write_bytes(b"altered")
+        with self.assertRaisesRegex(BriefError, "fingerprint mismatch"):
+            validate_current_outputs(metadata, candidates, read, _require, _json)
+
     def validate_only_continuation(self):
         read=lambda relative,limit:self.root.joinpath(relative).read_bytes()
         return validate_continuation(self.audit,self.call,self.call["attempt_records"][-1],

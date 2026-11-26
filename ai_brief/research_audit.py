@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .contracts import parse_time, validate
 from .storage import BriefError
 from .source_identity import source_identity
+from .archive_followup import mentions_source, require_uncited, validate_archive_followup
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 from . import discovery as community
 from .research_continuation import validate_continuation, validate_current_outputs
@@ -23,7 +24,6 @@ from .research_continuation import validate_continuation, validate_current_outpu
 LAYERED_TIME_TOLERANCE = 1e-6
 MAX_FILE_BYTES = 2_000_000
 MAX_PACKAGE_BYTES = 20_000_000
-WHOLE_EDITION_PACKAGE_BYTES = 32_000_000
 SELECTED = {"selected", "update"}
 PAGE_CHECKS = {
     "model-serving-gpu": ("model_serving",),
@@ -169,29 +169,57 @@ def validate_audit(directory):
         raise BriefError("Cannot read private audit package") from exc
 
 
+class _SourceTexts:
+    """只索引已核验的证据路径，按需解码当前使用的正文。"""
+
+    def __init__(self, read):
+        self.read = read
+        self.paths = {}
+
+    def register(self, source, relative, *, original=False):
+        raw = self.read(relative, MAX_PACKAGE_BYTES)
+        _require(hashlib.sha256(raw).hexdigest() == source["content_sha256"],
+                 "Original source response fingerprint mismatch" if original else "Source content fingerprint mismatch")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError as exc:
+            raise BriefError("Original source response must be UTF-8" if original else
+                             "Evidence must be the actual UTF-8 text read from the source") from exc
+        if community.executed_source_status(source) == "ok":
+            _require(bool(text.strip()), "Original successful source evidence is empty" if original else
+                     "Successful source evidence is empty")
+        self.paths[source["id"]] = relative
+
+    def get(self, identity, default=""):
+        relative = self.paths.get(identity)
+        if relative is None:
+            return default
+        return self.read(relative, MAX_PACKAGE_BYTES).decode("utf-8")
+
+
 def _validate_audit(directory):
     """只读检查；通过不等于证实事实或允许公开私有材料。"""
     root = Path(directory).resolve(strict=True)
     total = 0
-    package_limit = MAX_PACKAGE_BYTES
-    read_cache = {}
+    legacy_limit = False
+    fingerprints = {}
 
     def read(relative, max_bytes=MAX_FILE_BYTES):
         nonlocal total
-        if relative in read_cache:
-            data = read_cache[relative]
-            _require(len(data) <= max_bytes, "Audit file exceeds size limit")
-            return data
         path = root / relative
         _require(not path.is_symlink() and not path.parent.is_symlink(), "Audit files must not be symlinks")
         _require(path.is_file(), f"Missing audit file: {relative}")
         _require(path.stat().st_size <= max_bytes, "Audit file exceeds size limit")
-        remaining = min(max_bytes, package_limit - total)
         with path.open("rb") as stream:
-            data = stream.read(remaining + 1)
-        total += len(data)
-        _require(len(data) <= max_bytes and total <= package_limit, "Audit package exceeds size limit")
-        read_cache[relative] = data
+            data = stream.read(max_bytes + 1)
+        _require(len(data) <= max_bytes, "Audit file exceeds size limit")
+        fingerprint = hashlib.sha256(data).digest()
+        if relative in fingerprints:
+            _require(fingerprints[relative] == fingerprint, "Audit file changed during verification")
+        else:
+            fingerprints[relative] = fingerprint
+            total += len(data)
+            _require(not legacy_limit or total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
         return data
 
     metadata_bytes = read("audit.json")
@@ -361,9 +389,10 @@ def _validate_audit(directory):
     audit_prompt = read("prompts/audit.md")
     whole_edition = b"Group-Delivery: complete_six_topics_v1" in audit_prompt.splitlines()
     require_complete_first = whole_edition or metadata["date"] >= "2026-11-19"
-    if (whole_edition and layered_budget and page_scope is None
-            and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines()):
-        package_limit = WHOLE_EDITION_PACKAGE_BYTES
+    if whole_edition and layered_budget and b"Evidence-Package: whole_edition_32mb_v1" in audit_prompt.splitlines():
+        raise BriefError("Frozen whole-edition policy requires its pinned verifier or an explicit same-run migration")
+    legacy_limit = not (whole_edition and layered_budget)
+    _require(not legacy_limit or total <= MAX_PACKAGE_BYTES, "Audit package exceeds size limit")
     new_prompt = community.PROMPT_MARKER.encode() in audit_prompt
     _require(discovery_contract == new_prompt, "Coverage contract must match the original frozen audit prompt")
     history_bytes = read("history.json")
@@ -646,7 +675,7 @@ def _validate_audit(directory):
             if any(count > limits[f"{kind}_attempts"] for count in charged_attempts.values()):
                 blockers.append(f"{kind}_budget_exceeded")
 
-    sources, source_text = {}, {}
+    sources, source_text = {}, _SourceTexts(read)
     for index, source in enumerate(metadata["sources"]):
         identity = source["id"]
         _require(identity not in sources, "Duplicate source ID")
@@ -678,16 +707,13 @@ def _validate_audit(directory):
         else:
             _require((complete_contract or source["content_sha256"] is None) and bool(source["error"].strip()),
                      "Failed source needs an error, not a successful content fingerprint")
-        if source["content_sha256"] is not None:
-            # 原始来源可能超过元数据的单文件上限；总包预算仍约束完整原字节。
-            content = read(f"evidence/{identity}.txt", MAX_PACKAGE_BYTES)
-            _require(hashlib.sha256(content).hexdigest() == source["content_sha256"], "Source content fingerprint mismatch")
-            try:
-                source_text[identity] = content.decode("utf-8")
-            except UnicodeError as exc:
-                raise BriefError("Evidence must be the actual UTF-8 text read from the source") from exc
-            if community.executed_source_status(source) == "ok":
-                _require(bool(source_text[identity].strip()), "Successful source evidence is empty")
+        if "archive_followup" in source:
+            _require(whole_edition and layered_budget and page_scope is None and discovery_contract
+                     and b"Evidence-Package: streamed_whole_edition_v1" in audit_prompt.splitlines(),
+                     "Archive followup requires the streamed whole-edition contract")
+            validate_archive_followup(source, metadata, candidates, read, _json)
+        elif source["content_sha256"] is not None:
+            source_text.register(source, f"evidence/{identity}.txt")
 
     if previous_metadata is not None:
         for prior in previous_metadata["sources"]:
@@ -752,7 +778,7 @@ def _validate_audit(directory):
             else:
                 blockers.append("required_coverage_incomplete")
 
-    calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, {}, {}, {}
+    calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, _SourceTexts(read), {}, {}
     resolved_topic_reads = set()
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
@@ -832,19 +858,14 @@ def _validate_audit(directory):
                 _require(community.executed_source_status(prior) != "ok" or (prior_hash is not None and not community.executed_source_outcome(prior)[1]
                          and (not prior["error"] if prior["status"] == "ok" else bool(prior["error"].strip()))),
                          "Original successful source needs retained response bytes")
-                if prior_hash is not None:
+                if "archive_followup" in prior:
+                    _require(prior == current, "Retained archive followup must match its authenticated source")
+                    require_uncited(prior, prior_checks, original_candidates, output.get("discovery"))
+                elif prior_hash is not None:
                     _require(isinstance(prior_hash, str) and re.fullmatch(r"[a-f0-9]{64}", prior_hash),
                              "Original source fingerprint is invalid")
                     relative = f"evidence/{prior['id']}.txt" if current["content_sha256"] == prior_hash else f"evidence/{prior_hash}.txt"
-                    prior_bytes = read(relative, MAX_PACKAGE_BYTES)
-                    _require(hashlib.sha256(prior_bytes).hexdigest() == prior_hash,
-                             "Original source response fingerprint mismatch")
-                    try:
-                        retained_source_text[prior["id"]] = prior_bytes.decode("utf-8")
-                    except UnicodeError as exc:
-                        raise BriefError("Original source response must be UTF-8") from exc
-                    _require(community.executed_source_status(prior) != "ok" or bool(retained_source_text[prior["id"]].strip()),
-                             "Original successful source evidence is empty")
+                    retained_source_text.register(prior, relative, original=True)
                 retained_sources[prior["id"]] = prior
             if discovery_contract:
                 prior_discovery = output.get("discovery")
@@ -937,6 +958,10 @@ def _validate_audit(directory):
     if first_edition:
         research = calls.get("research")
         handoff, snapshot = _settled_research(research, read)
+        for source in sources.values():
+            if "archive_followup" in source:
+                require_uncited(source, snapshot.get("checks"), snapshot.get("candidates"), snapshot.get("discovery"),
+                                handoff.get("candidate_bindings_and_decisions"), handoff.get("page_status_sources"))
         settled_checks, settled_discovery, bound = {}, {}, {}
         if not prior_checks and not {"candidates", "checks", "sources"} <= snapshot.keys():
             blockers.append("complete_edition_required")
@@ -978,20 +1003,12 @@ def _validate_audit(directory):
                     if community.executed_source_status(original) != "ok":
                         bound[ref] = original
                     continue
-                if fingerprint == current["content_sha256"]:
-                    text = source_text[ref]
+                if "archive_followup" in original:
+                    _require(original == current, "Retained archive followup must match its authenticated source")
                 else:
-                    relative = f"evidence/{fingerprint}.txt"
-                    raw = read(relative, MAX_PACKAGE_BYTES)
-                    _require(hashlib.sha256(raw).hexdigest() == fingerprint, "Original source response fingerprint mismatch")
-                    try:
-                        text = raw.decode("utf-8")
-                    except UnicodeError as exc:
-                        raise BriefError("Original source response must be UTF-8") from exc
-                if community.executed_source_status(original) == "ok":
-                    _require(bool(text.strip()), "Original successful source evidence is empty")
+                    relative = f"evidence/{ref if fingerprint == current['content_sha256'] else fingerprint}.txt"
+                    retained_source_text.register(original, relative, original=True)
                 bound[ref] = retained_sources[ref] = original
-                retained_source_text[ref] = text
             if discovery_contract:
                 community.validate_discovery(validation, bound, retained_source_text, candidates, history,
                                              _require, _time, discovery_read, previous_metadata)
@@ -1010,17 +1027,16 @@ def _validate_audit(directory):
         _require(set(decision["history_entry_ids"]) <= history_ids, "History references must exist in the retained index")
         linked = references(decision["source_ids"])
         candidate = by_event[key]
-        versions = [(s, source_text.get(s["id"], "")) for s in linked]
-        versions.extend((retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
-                        for s in linked if s["id"] in retained_sources)
-        candidate_versions = [(retained_sources[s["id"]], retained_source_text.get(s["id"], ""))
-                              for s in linked if s["id"] in retained_sources] if prior_checks else versions
+        retained = [(retained_sources[s["id"]], retained_source_text) for s in linked if s["id"] in retained_sources]
+        versions = [(s, source_text) for s in linked] + retained
+        candidate_versions = retained if prior_checks else versions
         matching = [(s, text) for s, text in candidate_versions if community.executed_source_status(s) == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
                     and _time(s["retrieved_at"]) == _time(candidate["retrieved_at"])]
         _require(bool(matching), "Candidate needs matching publication, retrieval and source evidence")
-        candidate_reads[key] = {(s["id"], s["content_sha256"]) for s, text in matching if candidate["evidence"] in text}
+        candidate_reads[key] = {(s["id"], s["content_sha256"]) for s, texts in matching
+                                if candidate["evidence"] in texts.get(s["id"])}
         _require(bool(candidate_reads[key]), "Candidate evidence must occur in the retained source text")
         if decision["disposition"] in {"duplicate", "update"}:
             _require(bool(decision["history_entry_ids"]), "Duplicate/update decisions require history entry references")
@@ -1109,6 +1125,10 @@ def _validate_audit(directory):
         draft_bytes = read("draft.json")
         _require(hashlib.sha256(draft_bytes).hexdigest() == draft_sha, "Draft fingerprint mismatch")
         draft = _json(draft_bytes, "draft")
+        for source in sources.values():
+            if "archive_followup" in source:
+                _require(not mentions_source(draft, source["id"], source["url"]),
+                         "Archive followup cannot be cited in the report")
         _require(isinstance(draft, dict) and draft.get("date") == metadata["date"] and isinstance(draft.get("entries"), list),
                  "Draft must name this date and contain report entries")
         _require(type(draft.get("revision")) is int and draft["revision"] == current_revision,
@@ -1220,6 +1240,10 @@ def _validate_audit(directory):
     if page_scope is not None:
         result["page_scope"] = page_scope
         result["verified_event_keys"] = sorted(verified_keys)
+    followups = [dict(source_id=source["id"], **source["archive_followup"])
+                 for source in sources.values() if "archive_followup" in source]
+    if followups:
+        result["archive_followups"] = followups
     if layered_budget:
         result.update(evidence_metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
                       budget_accounting=accounting, run_elapsed_seconds=run_elapsed,

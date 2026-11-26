@@ -118,7 +118,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
         pointers.add(pointer)
     pairs = proof["control_commands"]
     need(isinstance(pairs, list) and 3 <= len(pairs) <= 264, "bounded control evidence is required")
-    controls, reserves, settlements, dispatches = {}, {}, {}, {}
+    controls, reserves, settlements, dispatches = set(), {}, {}, {}
     resumptions = []
     revisions = set()
     plan_hash = None
@@ -148,7 +148,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
         need(run["plan_hash"] == plan_hash, "commands must retain the same plan")
         need(run["revision"] not in revisions, "distinct commands cannot share a committed revision")
         revisions.add(run["revision"])
-        controls[cid] = (command, receipt)
+        controls.add(cid)
         args = command.get("args")
         need(isinstance(args, dict), "command arguments are missing")
         if command.get("action") == "reserve":
@@ -481,35 +481,51 @@ def validate_current_outputs(metadata, candidates, read, require, parse):
             require(isinstance(digest, str) and SHA.fullmatch(digest), "Continuation scalar output is invalid")
             hashes.add(digest)
         require(bool(hashes), "Continuation outputs must bind actual candidates or draft")
-        return {digest: artifact(digest) for digest in hashes}
+        return hashes
 
-    def candidate_lists(declared, allow_standalone=False):
-        matches = []
-        for raw in declared.values():
-            if raw.lstrip()[:1] not in (b"{", b"["):
-                continue
-            try:
-                value = parse(raw, "continuation research output")
-            except BriefError:
-                continue
-            if isinstance(value, dict) and ("candidates" in value or allow_standalone):
-                value = value.get("candidates", value)
-                if isinstance(value, dict) and value.get("mode") == "live" and isinstance(value.get("items"), list):
-                    matches.append(value["items"])
-        return matches
+    def candidate_match(raw, allow_standalone):
+        if raw.lstrip()[:1] not in (b"{", b"["):
+            return None
+        try:
+            value = parse(raw, "continuation research output")
+        except BriefError:
+            return None
+        if isinstance(value, dict) and ("candidates" in value or allow_standalone):
+            value = value.get("candidates", value)
+            if isinstance(value, dict) and value.get("mode") == "live" and isinstance(value.get("items"), list):
+                return value["items"] == candidates["items"]
+        return None
+
+    def check_candidates(hashes, direct_hash=None, allow_standalone=False):
+        matched = False
+        consistent = True
+        for digest in hashes:
+            raw = artifact(digest)
+            if direct_hash in hashes:
+                if digest == direct_hash:
+                    matched = raw == read("candidates.json", MAX_BYTES)
+            else:
+                match = candidate_match(raw, allow_standalone)
+                if match is not None:
+                    matched = True
+                    consistent = consistent and match
+        return matched and consistent
 
     def bind_draft(attempt):
         expected = metadata["inputs"]["draft_sha256"]
         declared = outputs(attempt)
-        require(expected in declared and declared[expected] == read("draft.json", MAX_BYTES),
+        matches = False
+        for digest in declared:
+            raw = artifact(digest)
+            if digest == expected:
+                matches = raw == read("draft.json", MAX_BYTES)
+        require(matches,
                 "Continuation current output must bind final candidates or draft bytes")
 
     if "research" in chains:
         declared = outputs(latest["research"])
         expected = metadata["inputs"]["candidates_sha256"]
-        direct = expected in declared and declared[expected] == read("candidates.json", MAX_BYTES)
-        wrapped = [] if direct else candidate_lists(declared)
-        require(direct or bool(wrapped) and all(items == candidates["items"] for items in wrapped),
+        require(check_candidates(declared, direct_hash=expected),
                 "Continuation current output must bind final candidates or draft bytes")
         if "editor" in latest and latest["editor"]["status"] in ("ok", "partial"):
             bind_draft(latest["editor"])
@@ -536,7 +552,7 @@ def validate_current_outputs(metadata, candidates, read, require, parse):
             require(isinstance(consumed_outputs, list) and all(isinstance(item, dict)
                     and isinstance(item.get("sha256"), str) and SHA.fullmatch(item["sha256"])
                     for item in consumed_outputs), "Editor current research outputs are required")
-            require({item["sha256"] for item in consumed_outputs} == set(outputs(latest["research"])),
+            require({item["sha256"] for item in consumed_outputs} == outputs(latest["research"]),
                     "Editor current research outputs must match latest result")
         else:
             require("research" in latest, "Editor-only continuation needs retained research")
@@ -548,6 +564,5 @@ def validate_current_outputs(metadata, candidates, read, require, parse):
             matching = [attempt for attempt in calls["research"].get("attempt_records", [])
                         if attempt.get("result_sha256") == retained["result_sha256"]]
             require(len(matching) == 1, "Editor prior checkpoint must match a retained research attempt")
-            items = candidate_lists(outputs(matching[0]), allow_standalone=True)
-            require(bool(items) and all(value == candidates["items"] for value in items),
+            require(check_candidates(outputs(matching[0]), allow_standalone=True),
                     "Editor-only continuation cannot introduce new research candidates")

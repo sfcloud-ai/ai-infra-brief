@@ -7,6 +7,7 @@ from copy import deepcopy
 from ai_brief.contracts import RESOURCE_ROOT
 from ai_brief.research_audit import PAGE_CHECKS, _settled_research
 from ai_brief.storage import BriefError
+from ai_brief.source_identity import source_identity
 from tests import test_community_discovery as community
 from tests import test_layered_budget as layered
 from tests import test_page_scope as scoped
@@ -129,7 +130,7 @@ class CompleteEditionTests(unittest.TestCase):
     def test_full_edition_capacity_preserves_original_reads_and_individual_limits(self):
         case = self.discovery_edition()
         case.audit["checks"]["model_serving"]["source_ids"].append("source")
-        ids = ("source", "coverage-model_serving")
+        ids = ("source", "coverage-model_serving", "coverage-hardware")
         evidence = case.root / "evidence"
         original = {key: (evidence / (key + ".txt")).read_bytes() for key in ids}
 
@@ -139,25 +140,74 @@ class CompleteEditionTests(unittest.TestCase):
             next(s for s in case.audit["sources"] if s["id"] == key)["content_sha256"] = hashlib.sha256(data).hexdigest()
 
         for key in ids:
-            pad(key, 11_000_000)
+            pad(key, 16_000_000)
         self.settle_checks(case)
         self.assertEqual(case.check()["readiness"], "ready")
         prompt = case.root / "prompts" / "audit.md"
         current = prompt.read_bytes()
-        marker = b"Evidence-Package: whole_edition_32mb_v1"
+        marker = b"Group-Delivery: complete_six_topics_v1"
         historical = current.replace(marker, b"")
         self.assertNotEqual(current, historical)
+        pinned_policy = current.replace(b"streamed_whole_edition_v1", b"whole_edition_32mb_v1")
+        prompt.write_bytes(pinned_policy)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(pinned_policy).hexdigest()
+        case.reject("pinned verifier or an explicit same-run migration")
         prompt.write_bytes(historical)
         case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(historical).hexdigest()
         case.reject("Audit package exceeds size limit")
         prompt.write_bytes(current)
         case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(current).hexdigest()
-        for key in ids:
-            pad(key, 16_000_000)
-        case.reject("Audit package exceeds size limit")
+        self.assertEqual(case.check()["readiness"], "ready")
         pad(ids[1], len(original[ids[1]]))
         pad(ids[0], 20_000_001)
         case.reject("Audit file exceeds size limit")
+
+    def test_uncited_pdf_followup_preserves_actual_get_and_cannot_supply_evidence(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        self.settle_checks(case)
+        before = case.check()["budget_accounting"]
+        reserve = deepcopy(next(s for s in case.audit["sources"] if s["id"] == "source"))
+        raw = b"%PDF-1.7\n%\xff\x80 supplemental only"
+        body_hash = hashlib.sha256(raw).hexdigest()
+        reserve.update(id="reserve-pdf", url="https://arxiv.org/pdf/1234.56789v1", content_sha256=body_hash)
+        op = "1cf99925-17c6-4d16-91bf-8c75a09c03d9"
+        attempt = reserve["attempt_records"][0]
+        result = dict(operation_id=op, request_id="morning-20261106-r1", source_id=reserve["id"], url=reserve["url"],
+                      input_sha256=source_identity(reserve["url"])["hash"], content_sha256=body_hash,
+                      status="ok", elapsed_seconds=reserve["elapsed_seconds"], reserved_seconds=attempt["reserved_seconds"],
+                      error="", curl_exit_code=0, http_status=200, response_complete=True, dispatch_started=True,
+                      attempts_in_this_operation=1, coverage_status="not_assessed", transfer={"content_type": "application/pdf"},
+                      artifacts={"response.body.bin": {"sha256": body_hash, "bytes": len(raw)}})
+        receipt = original_audit.encoded(result)
+        followup = dict(operation_id=op, result_sha256=case.artifact(receipt), body_sha256=body_hash, bytes=len(raw))
+        reserve["archive_followup"] = followup
+        case.audit["sources"].append(reserve)
+        self.assertEqual(case.check()["readiness"], "ready")
+        self.settle_checks(case)
+        audit = case.check()
+        self.assertEqual(audit["readiness"], "ready")
+        self.assertEqual(audit["archive_followups"], [dict(source_id=reserve["id"], **followup)])
+        self.assertEqual(audit["budget_accounting"]["successful_attempts"]["source"], before["successful_attempts"]["source"] + 1)
+        self.assertEqual(audit["budget_accounting"]["successful_seconds"], before["successful_seconds"] + reserve["elapsed_seconds"])
+        for ref in [case.audit["checks"]["embodied_training"], case.audit["decisions"][0], case.audit["status_entries"][0]]:
+            ref["source_ids"].append(reserve["id"])
+            case.reject("cannot supply")
+            ref["source_ids"].pop()
+        case.draft["subtitle"] = reserve["url"]
+        case.reject("cannot be cited")
+        case.draft["subtitle"] = "verified sources"
+        followup["bytes"] += 1
+        case.reject("does not match")
+        followup["bytes"] -= 1
+        body = case.root / "evidence/reserve-pdf.txt"
+        body.write_bytes(raw)
+        del reserve["archive_followup"]
+        case.reject("actual UTF-8")
+        body.write_bytes(b"modified")
+        case.reject("fingerprint mismatch")
+        body.unlink()
+        case.reject("Missing audit file")
 
     def test_topic_uses_archived_original_after_a_successful_reread(self):
         case = self.discovery_edition()
