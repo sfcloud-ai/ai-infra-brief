@@ -26,6 +26,7 @@ def main(argv=None):
     deliver.add_argument("--adapter", default="mock")
     audit = commands.add_parser("audit-research", help="Validate a PRIVATE live research package; never publish or send")
     audit.add_argument("directory", type=Path)
+    audit.add_argument("--edition-migration", type=Path, help="Exact private Publisher migration receipt for this frozen edition")
     sources = commands.add_parser("source-followup", help="Plan the next source batch from retained native receipts")
     sources.add_argument("ledger", type=Path)
     sources.add_argument("operations", type=Path)
@@ -36,7 +37,7 @@ def main(argv=None):
             result = run(args.state_dir, args.fixture, as_of=args.as_of, requested_date=args.date,
                          allow_backfill=args.allow_backfill, adapter=args.adapter, history_dir=args.history_dir)
         elif args.command == "audit-research":
-            result = validate_audit(args.directory)
+            result = validate_audit(args.directory, edition_migration=args.edition_migration)
         elif args.command == "source-followup":
             result = source_followup(args.ledger, args.operations, args.since)
         else:
