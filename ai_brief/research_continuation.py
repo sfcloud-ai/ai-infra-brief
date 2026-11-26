@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import re
 
 from .storage import BriefError
@@ -11,6 +12,66 @@ from .source_identity import source_identity, UnsupportedURL
 MAX_BYTES = 20_000_000
 SHA = re.compile(r"[a-f0-9]{64}")
 UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}")
+
+
+def settled_research_input(document, request, blob, need):
+    """以冻结输入引用的原始结果和结算命令验证嵌套来源清单。"""
+    rows = document.get("sources")
+    if not isinstance(rows, list) or not any(isinstance(row, dict) and "raw_result" in row for row in rows):
+        return document
+
+    def check(ok):
+        need(ok, "original settled research source differs")
+
+    def original(ref):
+        check(isinstance(ref, dict) and isinstance(ref.get("sha256"), str) and SHA.fullmatch(ref["sha256"])
+              and type(ref.get("bytes")) is int and 0 < ref["bytes"] <= MAX_BYTES)
+        raw = blob(ref["sha256"])
+        check(len(raw) == ref["bytes"] and hashlib.sha256(raw).hexdigest() == ref["sha256"])
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            value = None
+        check(isinstance(value, dict))
+        return value
+
+    sources, seen = [], set()
+    for row in rows:
+        check(isinstance(row, dict) and isinstance(row.get("settlement"), dict)
+              and isinstance(row.get("artifacts"), dict))
+        receipt = original(row.get("raw_result"))
+        settlement = row["settlement"]
+        command = original(settlement.get("original_command"))
+        args = command.get("args")
+        oid = row.get("operation_id")
+        body = row["artifacts"].get("response.body.bin")
+        raw_body = receipt.get("artifacts", {}).get("response.body.bin") if isinstance(receipt.get("artifacts"), dict) else None
+        try:
+            identity = source_identity(row.get("url"))["hash"]
+        except UnsupportedURL:
+            identity = None
+        check(isinstance(oid, str) and UUID.fullmatch(oid) and oid not in seen and receipt.get("request_id") == request
+              and all(key in row and key in receipt and row[key] == receipt[key]
+                      for key in ("operation_id", "source_id", "url", "input_sha256", "status", "elapsed_seconds"))
+              and row["status"] in ("ok", "failed") and type(row["elapsed_seconds"]) in (int, float)
+              and math.isfinite(row["elapsed_seconds"]) and row["elapsed_seconds"] >= 0
+              and type(receipt["elapsed_seconds"]) in (int, float) and isinstance(row["source_id"], str) and bool(row["source_id"])
+              and identity is not None and row["input_sha256"] == identity
+              and isinstance(body, dict) and isinstance(raw_body, dict) and isinstance(body.get("sha256"), str)
+              and SHA.fullmatch(body["sha256"]) and body["sha256"] == raw_body.get("sha256") == receipt.get("content_sha256")
+              and type(body.get("bytes")) is int and body["bytes"] >= (1 if row["status"] == "ok" else 0)
+              and type(raw_body.get("bytes")) is int and body["bytes"] == raw_body["bytes"]
+              and isinstance(command.get("command_id"), str) and UUID.fullmatch(command["command_id"])
+              and command.get("action") == "settle" and command.get("request_id") == request and isinstance(args, dict)
+              and args.get("operation_id") == oid and args.get("outcome") == "acknowledged"
+              and type(args.get("elapsed_seconds")) in (int, float) and args["elapsed_seconds"] == row["elapsed_seconds"]
+              and isinstance(settlement.get("archive_sha256"), str) and SHA.fullmatch(settlement["archive_sha256"])
+              and args.get("archive_sha256") == settlement["archive_sha256"]
+              and args.get("file_sha256") == settlement.get("result_sha256") == row["raw_result"]["sha256"])
+        seen.add(oid)
+        sources.append(dict(operation_id=oid, input_sha256=row["input_sha256"], result_sha256=args["file_sha256"],
+                            url=row["url"], status=row["status"], elapsed_seconds=row["elapsed_seconds"], body_sha256=body["sha256"]))
+    return {**document, "sources": sources}
 
 
 def referenced_editor_input(document, request, previous_id, obj, need):
@@ -235,6 +296,8 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
          and sha(manifest["checkpoint_archive_sha256"]), "preceding successful checkpoint must be retained")
     payload, original = obj(manifest["payload_sha256"]), obj(previous["input_sha256"])
     prior_input = original
+    if stage == "research":
+        prior_input = settled_research_input(original, request, blob, need)
     if "sources" not in original and stage == "editor" and original.get("source_records_location") == "findings.json#/source_records":
         prior_input = referenced_editor_input(original, request, previous_id, obj, need)
         if payload.get("research") == original["research"]:
@@ -317,6 +380,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
     need(isinstance(evidence, list) and 1 <= len(evidence) <= 64, "new evidence list is required")
     seen, used_links, added_sources = set(), set(), set()
     added_research = False
+    new_success = False
     for item in evidence:
         need(exact(item, "operation_id archive_sha256 file_sha256") and uid(item["operation_id"])
              and item["operation_id"] not in seen and item["operation_id"] in reserves,
@@ -330,7 +394,15 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
             need(oid not in cancelled_ids, "executed source cannot reuse an undispatched operation")
             added_sources.add(oid)
             content_sha = result.get("content_sha256")
-            need(result.get("status") in ("ok", "success") and result.get("response_complete") is True
+            failed_context = stage == "research" and prior_input is not original and result.get("status") == "failed"
+            if failed_context:
+                need(result.get("dispatch_started") is True and type(result.get("attempts_in_this_operation")) is int
+                     and result["attempts_in_this_operation"] == 1 and isinstance(result.get("error"), str) and result["error"].strip()
+                     and type(result.get("curl_exit_code")) is int and (result["curl_exit_code"] != 0
+                     or type(result.get("http_status")) is int and not 200 <= result["http_status"] < 300)
+                     and sha(content_sha), "failed context must bind an executed GET failure")
+            else:
+                need(result.get("status") in ("ok", "success") and result.get("response_complete") is True
                  and result.get("curl_exit_code") == 0 and type(result.get("curl_exit_code")) is int
                  and result.get("error") == "" and type(result.get("http_status")) is int
                  and 200 <= result["http_status"] < 300 and sha(content_sha), "source evidence must be a complete successful response")
@@ -341,6 +413,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
                  and inputs[0].get("body_sha256") == content_sha,
                  "payload source must bind the actual result and response")
             source_claim = inputs[0]
+            need(not failed_context or source_claim.get("status") == "failed", "failed context must retain failed status")
             claimed_identity = None
             if "url" in source_claim:
                 try:
@@ -354,7 +427,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
                  and ("elapsed_seconds" not in source_claim or type(source_claim["elapsed_seconds"]) in {int, float}
                       and source_claim["elapsed_seconds"] == result["elapsed_seconds"]),
                  "payload source outcome differs from its settled result")
-            need(content_sha not in prior_hashes, "added source must contain new response bytes")
+            need(failed_context or content_sha not in prior_hashes, "added source must contain new response bytes")
             matching = [source for source in metadata["sources"] if source["id"] == source_id]
             need(len(matching) == 1 and attempt_index < len(matching[0].get("attempt_records", [])),
                  "source operation must map to exactly one retained attempt")
@@ -373,7 +446,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
                  == result_identity["hash"] == grant_identity["hash"],
                  "source request fingerprint mismatch")
             used_links.add(oid)
-            need(source_attempt["status"] == "ok" and source_attempt["error"] == ""
+            need(source_attempt["status"] == ("failed" if failed_context else "ok") and source_attempt["error"] == result["error"]
                  and source_attempt["elapsed_seconds"] == result["elapsed_seconds"]
                  and source_attempt["reserved_seconds"] == operation["max_seconds"], "source attempt binding mismatch")
             executed = [index for index, old in enumerate(source["attempt_records"]) if old["status"] != "not_dispatched"]
@@ -381,7 +454,8 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
                  "last executed source result must match current response bytes")
             path = source["id"] if source["content_sha256"] == content_sha else content_sha
             body = read(f"evidence/{path}.txt", MAX_BYTES)
-            need(hashlib.sha256(body).hexdigest() == content_sha and bool(body.strip()), "source response bytes must be retained and nonempty")
+            need(hashlib.sha256(body).hexdigest() == content_sha and (failed_context or bool(body.strip())), "source response bytes must match the retained outcome")
+            new_success |= not failed_context
         else:
             added_research = True
             need(stage == "editor" and operation.get("kind") == "model" and operation.get("key") == "research"
@@ -437,6 +511,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
     mutable_fields = {"request_id", "stage", "sources", "research", "continuation"}
     need(all(key in mutable_fields or key in prior_input and same(value, prior_input[key])
              for key, value in payload.items()), "payload contains unverified top-level context")
+    need(new_success or added_research, "a continuation needs new successful evidence")
     need(used_links == set(linked), "unused source attempt mappings are not allowed")
     return True
 

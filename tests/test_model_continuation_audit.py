@@ -854,6 +854,48 @@ class ModelContinuationAuditTests(LayeredBudgetTests):
         return validate_continuation(self.audit,self.call,self.call["attempt_records"][-1],
                                      self.call["attempt_records"][-2],read,_require,_json)
 
+    def test_research_continues_from_the_original_nested_settlement(self):
+        self.continuation(previous_status="partial")
+        oid = str(uuid4())
+        body = {"bytes": 3, "sha256": hashlib.sha256(b"old").hexdigest()}
+        row = dict(operation_id=oid, source_id="old", url="https://example.org/old",
+                   input_sha256=source_identity("https://example.org/old")["hash"], status="ok", elapsed_seconds=2, artifacts={"response.body.bin": body})
+        raw = encoded(dict(row, request_id=self.request, content_sha256=body["sha256"]))
+        row["raw_result"] = dict(bytes=len(raw), sha256=self.artifact(raw))
+        args = dict(operation_id=oid, archive_sha256="2"*64, file_sha256=row["raw_result"]["sha256"],
+                    outcome="acknowledged", elapsed_seconds=2)
+        command = encoded(dict(action="settle", command_id=str(uuid4()), request_id=self.request, args=args))
+        row["settlement"] = dict(original_command=dict(bytes=len(command), sha256=self.artifact(command)),
+                                 archive_sha256=args["archive_sha256"], result_sha256=args["file_sha256"])
+        self.prior_input["sources"] = [row]
+        self.refresh_prior_input()
+        self.assertTrue(self.validate_only_continuation())
+        for command, receipt, pair in (self.current_reserve, self.current_settle):
+            command["expected_revision"] += 2
+            receipt["result"]["run"]["revision"] += 2
+            self.refresh_control((command, receipt, pair))
+        failed_id = str(uuid4())
+        failed_input = source_identity("https://example.org/failed")
+        empty = hashlib.sha256(b"").hexdigest()
+        failure = dict(request_id=self.request, operation_id=failed_id, input_sha256=failed_input["hash"],
+                       url=failed_input["value"]["url"], status="failed", elapsed_seconds=2, error="TLS", content_sha256=empty,
+                       dispatch_started=True, attempts_in_this_operation=1, curl_exit_code=35, http_status=0)
+        failure_sha = self.js(failure)
+        self.reserve(failed_id, "source", failed_input["hash"], failed_input["hash"], failed_input["value"], 10, 6)
+        self.settle(failed_id, failure_sha, 2, 7)
+        self.audit["sources"].append(dict(id="failed-read", url=failure["url"], content_sha256=empty, attempt_records=[
+            dict(status="failed", elapsed_seconds=2, reserved_seconds=10, error="TLS")]))
+        (self.root / "evidence" / "failed-read.txt").write_bytes(b"")
+        self.proof["source_attempts"].append(dict(operation_id=failed_id, source_id="failed-read", attempt_index=0))
+        self.manifest["added_evidence"].append(dict(operation_id=failed_id, archive_sha256="b"*64, file_sha256=failure_sha))
+        self.payload["sources"].append(dict(operation_id=failed_id, result_sha256=failure_sha, body_sha256=empty, status="failed"))
+        self.refresh_manifest()
+        self.assertTrue(self.validate_only_continuation())
+        row["artifacts"]["response.body.bin"] = dict(body, bytes=4)
+        self.refresh_prior_input()
+        with self.assertRaisesRegex(BriefError, "original settled research source"):
+            self.validate_only_continuation()
+
     def test_successful_source_cannot_reuse_cancelled_grant(self):
         self.continuation()
         self.audit["sources"][1]["attempt_records"].append(dict(status="not_dispatched",
