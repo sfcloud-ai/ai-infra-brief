@@ -849,10 +849,16 @@ class ModelContinuationAuditTests(LayeredBudgetTests):
         with self.assertRaisesRegex(BriefError, "fingerprint mismatch"):
             validate_current_outputs(metadata, candidates, read, _require, _json)
 
-    def validate_only_continuation(self):
+    def validate_only_continuation(self, **options):
         read=lambda relative,limit:self.root.joinpath(relative).read_bytes()
         return validate_continuation(self.audit,self.call,self.call["attempt_records"][-1],
-                                     self.call["attempt_records"][-2],read,_require,_json)
+                                     self.call["attempt_records"][-2],read,_require,_json,**options)
+
+    def test_migration_requires_the_original_continuation_plan(self):
+        self.continuation(previous_status="partial")
+        self.assertTrue(self.validate_only_continuation(expected_plan_hash="a"*64))
+        with self.assertRaisesRegex(BriefError, "same plan"):
+            self.validate_only_continuation(expected_plan_hash="b"*64)
 
     def test_research_continues_from_the_original_nested_settlement(self):
         self.continuation(previous_status="partial")

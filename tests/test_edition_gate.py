@@ -179,11 +179,7 @@ class CompleteEditionTests(unittest.TestCase):
         with self.assertRaisesRegex(BriefError, "Invalid same-run"):
             validate_audit(case.root, edition_migration=receipt)
 
-    def test_uncited_pdf_followup_preserves_actual_get_and_cannot_supply_evidence(self):
-        case = self.discovery_edition()
-        case.audit["checks"]["model_serving"]["source_ids"].append("source")
-        self.settle_checks(case)
-        before = case.check()["budget_accounting"]
+    def reserve_pdf(self, case):
         reserve = deepcopy(next(s for s in case.audit["sources"] if s["id"] == "source"))
         raw = b"%PDF-1.7\n%\xff\x80 supplemental only"
         body_hash = hashlib.sha256(raw).hexdigest()
@@ -198,6 +194,38 @@ class CompleteEditionTests(unittest.TestCase):
                       artifacts={"response.body.bin": {"sha256": body_hash, "bytes": len(raw)}})
         receipt = original_audit.encoded(result)
         followup = dict(operation_id=op, result_sha256=case.artifact(receipt), body_sha256=body_hash, bytes=len(raw))
+        return reserve, followup, raw
+
+    def test_migration_preserves_frozen_source_and_scopes_the_single_ticket(self):
+        from unittest.mock import patch
+        from ai_brief.edition_migration import EditionMigration
+        from ai_brief.research_audit import validate_audit
+
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        reserve, ticket, _ = self.reserve_pdf(case)
+        case.audit["sources"].append(reserve)
+        self.settle_checks(case)
+        reserve["archive_followup"] = ticket
+        prompt = case.root / "prompts" / "audit.md"
+        data = prompt.read_bytes().replace(b"streamed_whole_edition_v1", b"whole_edition_32mb_v1")
+        prompt.write_bytes(data)
+        case.audit["inputs"]["prompt_hashes"]["audit.md"] = hashlib.sha256(data).hexdigest()
+        case.save()
+        migration = EditionMigration("1"*64, "2"*64, dict(ticket))
+        with patch("ai_brief.research_audit.read_migration", return_value=migration):
+            self.assertEqual(validate_audit(case.root, edition_migration="receipt")["readiness"], "ready")
+            reserve["archive_followup"] = dict(ticket, bytes=ticket["bytes"]+1)
+            case.save()
+            with self.assertRaisesRegex(BriefError, "original reserve PDF"):
+                validate_audit(case.root, edition_migration="receipt")
+
+    def test_uncited_pdf_followup_preserves_actual_get_and_cannot_supply_evidence(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        self.settle_checks(case)
+        before = case.check()["budget_accounting"]
+        reserve, followup, raw = self.reserve_pdf(case)
         reserve["archive_followup"] = followup
         case.audit["sources"].append(reserve)
         self.assertEqual(case.check()["readiness"], "ready")

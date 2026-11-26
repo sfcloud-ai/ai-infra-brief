@@ -115,7 +115,7 @@ def referenced_editor_input(document, request, previous_id, obj, need):
     return {**document, "sources": sources, "research": {k: v for k, v in research.items() if k not in telemetry}}
 
 
-def validate_continuation(metadata, record, attempt, previous, read, require, parse, source_bindings=None):
+def validate_continuation(metadata, record, attempt, previous, read, require, parse, source_bindings=None, *, expected_plan_hash=None):
     """只为有完整原始命令链、检查点和新增内容的同阶段续接放行。"""
     request = "morning-" + metadata["date"].replace("-", "") + "-r1"
     stage = record["stage"]
@@ -182,7 +182,7 @@ def validate_continuation(metadata, record, attempt, previous, read, require, pa
     controls, reserves, settlements, dispatches = set(), {}, {}, {}
     resumptions = []
     revisions = set()
-    plan_hash = None
+    plan_hash = expected_plan_hash
     for pair in pairs:
         need(exact(pair, "command_sha256 receipt_sha256"), "control reference fields mismatch")
         command, envelope = obj(pair["command_sha256"]), obj(pair["receipt_sha256"])

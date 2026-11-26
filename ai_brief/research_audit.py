@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 from .contracts import parse_time, validate
 from .storage import BriefError
 from .source_identity import source_identity
-from .edition_migration import migration_digest
+from .edition_migration import read_migration
 from .archive_followup import mentions_source, require_uncited, validate_archive_followup
 from .coverage import CONTRACT, REQUIRED_CHECKS, FAILURE_KINDS, source_matches, notice_prefix
 from . import discovery as community
@@ -394,7 +394,9 @@ def _validate_audit(directory, edition_migration=None):
     adopted = None
     if edition_migration is not None:
         _require(frozen_cap and page_scope is None, "Migration requires the original whole-edition policy")
-        adopted = migration_digest(edition_migration, metadata, audit_prompt)
+        adopted = read_migration(edition_migration, metadata, audit_prompt, _json)
+        _require([s["archive_followup"] for s in metadata["sources"] if "archive_followup" in s]
+                 == [adopted.reserve_pdf], "Migration must bind exactly the original reserve PDF")
     elif frozen_cap:
         raise BriefError("Frozen whole-edition policy requires its pinned verifier or an explicit same-run migration")
     legacy_limit = not (whole_edition and layered_budget)
@@ -646,7 +648,8 @@ def _validate_audit(directory, edition_migration=None):
                 if number:
                     previous = attempts[number - 1]
                     continuation = has_continuation and validate_continuation(
-                        metadata, record, attempt, previous, read, _require, _json, continuation_source_bindings)
+                        metadata, record, attempt, previous, read, _require, _json, continuation_source_bindings,
+                        expected_plan_hash=adopted.plan_sha256 if adopted else None)
                     preceding_round = previous.get("page_round", {}).get("revision", 1)
                     new_round = kind == "model" and previous_metadata is not None and round_id > preceding_round
                     known_source_read = kind == "source" and previous["status"] == "ok"
@@ -837,8 +840,10 @@ def _validate_audit(directory, edition_migration=None):
                 _require(isinstance(prior, dict) and isinstance(prior.get("id"), str),
                          "Original source identity is invalid")
                 _require(prior["id"] not in prior_by_id, "Original source identity is duplicated")
-                prior_by_id[prior["id"]] = prior
                 current = sources.get(prior["id"])
+                if adopted:
+                    prior = adopted.retained_source(prior, current)
+                prior_by_id[prior["id"]] = prior
                 records = prior.get("attempt_records") if isinstance(prior, dict) else None
                 _require(current is not None and current["url"] == prior.get("url")
                          and isinstance(records, list) and records
@@ -996,6 +1001,8 @@ def _validate_audit(directory, edition_migration=None):
             for original in originals:
                 ref, fingerprint = original["id"], original["content_sha256"]
                 current = sources.get(ref)
+                if adopted:
+                    original = adopted.retained_source(original, current)
                 _require(current and current["url"] == original["url"], "Settled source ID and URL must be preserved")
                 attempts = original.get("attempt_records")
                 if attempts and current.get("attempt_records", [])[:len(attempts)] != attempts:
@@ -1251,7 +1258,7 @@ def _validate_audit(directory, edition_migration=None):
     if followups:
         result["archive_followups"] = followups
     if adopted:
-        result["edition_migration_sha256"] = adopted
+        result["edition_migration_sha256"] = adopted.digest
     if layered_budget:
         result.update(evidence_metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(),
                       budget_accounting=accounting, run_elapsed_seconds=run_elapsed,
