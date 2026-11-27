@@ -12,12 +12,27 @@ from unittest.mock import patch
 
 from ai_brief.cli import main
 from ai_brief.contracts import RESOURCE_ROOT
-from ai_brief.research_audit import MAX_FILE_BYTES, MAX_PACKAGE_BYTES, validate_audit
+from ai_brief.research_audit import MAX_FILE_BYTES, MAX_PACKAGE_BYTES, _same_candidate_claims, validate_audit
 from ai_brief.storage import BriefError
 
 
 def encoded(value):
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+class CandidateCorrectionTests(unittest.TestCase):
+    def test_only_excerpt_may_change(self):
+        original = [{"event_key": "e1", "source_url": "https://example.org/1",
+                     "summary": "unchanged claim", "evidence": "old wording"}]
+        corrected = [{**original[0], "evidence": "literal excerpt"}]
+        self.assertTrue(_same_candidate_claims(original, corrected))
+        for change in ({"event_key": "e2"}, {"source_url": "https://example.org/2"},
+                       {"summary": "different claim"}, {"unexpected": True}):
+            with self.subTest(change=change):
+                self.assertFalse(_same_candidate_claims(original, [{**corrected[0], **change}]))
+        self.assertFalse(_same_candidate_claims(original, []))
+        self.assertFalse(_same_candidate_claims(original, corrected * 2))
+        self.assertFalse(_same_candidate_claims(original, [{"event_key": "e1"}]))
 
 
 class ResearchAuditTests(unittest.TestCase):

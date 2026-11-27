@@ -58,6 +58,29 @@ class CompleteEditionTests(unittest.TestCase):
             case.draft["entries"].append(dict(event_key=key, article_id=page, source_urls=[uri]))
         return case
 
+    def test_corrected_excerpt_requires_the_settled_response(self):
+        case = self.discovery_edition()
+        case.audit["checks"]["model_serving"]["source_ids"].append("source")
+        literal = case.candidate["evidence"]
+        excluded = dict(case.candidate, event_key="excluded", evidence="Original paraphrase")
+        case.candidates["items"].append(excluded)
+        case.audit["decisions"].append(dict(event_key="excluded", disposition="out_of_scope",
+                                           source_ids=["source"], reason="Synthetic exclusion", history_entry_ids=[]))
+        self.settle_checks(case)
+        source = case.audit["sources"][0]
+        body = case.root / "evidence/source.txt"
+        body.with_name(source["content_sha256"] + ".txt").write_bytes(body.read_bytes())
+        updated = b"Line only in the subsequent response"
+        body.write_bytes(updated)
+        source["attempt_records"].append(deepcopy(source["attempt_records"][-1]))
+        source.update(attempts=2, elapsed_seconds=source["elapsed_seconds"] * 2,
+                      content_sha256=hashlib.sha256(updated).hexdigest())
+        excluded["evidence"] = updated.decode()
+        with self.assertRaisesRegex(BriefError, "Candidate evidence must occur in the retained source text"):
+            case.check()
+        excluded["evidence"] = literal
+        self.assertEqual(case.check()["readiness"], "ready")
+
     def test_recovered_check_can_coexist_with_another_disclosed_gap(self):
         case = self.discovery_edition()
         case.audit["checks"]["model_serving"]["source_ids"].append("source")

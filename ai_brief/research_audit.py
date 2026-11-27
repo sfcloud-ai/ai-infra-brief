@@ -43,6 +43,18 @@ COVERAGE_LABELS = {
 }
 
 
+def _same_candidate_claims(original, corrected):
+    """保留已结算的候选结论，由后续原文检查验证更正后的摘录。"""
+    if not isinstance(original, list) or not isinstance(corrected, list) or len(original) != len(corrected):
+        return False
+    return all(
+        isinstance(left, dict) and isinstance(right, dict)
+        and left.keys() == right.keys()
+        and all(value == right[key] for key, value in left.items() if key != "evidence")
+        for left, right in zip(original, corrected)
+    )
+
+
 def _json(data, label):
     # 重复键和非有限数不能在解析后静默覆盖真实记录。
     def pairs(values):
@@ -788,6 +800,7 @@ def _validate_audit(directory, edition_migration=None):
                 blockers.append("required_coverage_incomplete")
 
     calls, retained_sources, retained_source_text, prior_checks, prior_discovery = {}, {}, _SourceTexts(read), {}, {}
+    corrected_evidence_keys = set()
     resolved_topic_reads = set()
     for index, call in enumerate(metadata["model_calls"]):
         _require(call["stage"] not in calls, "Duplicate model stage")
@@ -979,7 +992,13 @@ def _validate_audit(directory, edition_migration=None):
         if not prior_checks and "checks" in snapshot:
             original_candidates = snapshot.get("candidates")
             _require(isinstance(original_candidates, dict) and original_candidates.get("mode") == "live"
-                     and original_candidates.get("items") == candidates["items"], "Settled research candidates differ")
+                     and _same_candidate_claims(original_candidates.get("items"), candidates["items"]),
+                     "Settled research candidates differ")
+            corrected_evidence_keys = {
+                current["event_key"]
+                for original, current in zip(original_candidates["items"], candidates["items"])
+                if original["evidence"] != current["evidence"]
+            }
             originals = snapshot.get("sources")
             checks, discovery = snapshot["checks"], snapshot.get("discovery", {})
             _require(isinstance(checks, dict) and isinstance(discovery, dict) and isinstance(originals, list)
@@ -1042,7 +1061,7 @@ def _validate_audit(directory, edition_migration=None):
         candidate = by_event[key]
         retained = [(retained_sources[s["id"]], retained_source_text) for s in linked if s["id"] in retained_sources]
         versions = [(s, source_text) for s in linked] + retained
-        candidate_versions = retained if prior_checks else versions
+        candidate_versions = retained if prior_checks or key in corrected_evidence_keys else versions
         matching = [(s, text) for s, text in candidate_versions if community.executed_source_status(s) == "ok" and s["url"] == candidate["source_url"]
                     and s["published_at"] is not None
                     and _time(s["published_at"]) == _time(candidate["published_at"])
