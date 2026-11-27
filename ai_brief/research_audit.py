@@ -44,7 +44,7 @@ COVERAGE_LABELS = {
 
 
 def _same_candidate_claims(original, corrected):
-    """Keep settled claims fixed; the source check below verifies any new excerpt."""
+    """保留已结算的候选结论，由后续原文检查验证更正后的摘录。"""
     if not isinstance(original, list) or not isinstance(corrected, list) or len(original) != len(corrected):
         return False
     return all(
